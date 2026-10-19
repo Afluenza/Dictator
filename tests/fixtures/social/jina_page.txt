@@ -1,0 +1,16 @@
+Title: Speech synthesis
+
+URL Source: https://en.wikipedia.org/wiki/Text-to-speech
+
+Published Time: 2002-03-04T15:36:04Z
+
+Markdown Content:
+![Image 1](https://thumb.wikimedia.org/wikipedia/commons/thumb/8/87/Gnome-mime-sound-openclipart.svg/60px-Gnome-mime-sound-openclipart.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail)
+
+A synthetic voice announcing an arriving train in Sweden.
+
+**Speech synthesis** is the artificial production of human [speech](https://en.wikipedia.org/wiki/Speech "Speech"). A computer system used for this purpose is called a **speech synthesizer**, and can be implemented in [software](https://en.wikipedia.org/wiki/Software "Software") or [hardware](https://en.wikipedia.org/wiki/Computer_hardware "Computer hardware") products. A **text-to-speech** (**TTS**) system converts normal language text into speech; other systems render [symbolic linguistic representations](https://en.wikipedia.org/wiki/Symbolic_linguistic_representation "Symbolic linguistic representation") like [phonetic transcriptions](https://en.wikipedia.org/wiki/Phonetic_transcription "Phonetic transcription") into speech.[[1]](https://en.wikipedia.org/wiki/Text-to-speech#cite_note-1) The reverse process is [speech recognition](https://en.wikipedia.org/wiki/Speech_recognition "Speech recognition").
+
+Synthesized speech can be created by [concatenating](https://en.wikipedia.org/wiki/Concatenative_synthesis "Concatenative synthesis") pieces of recorded speech that are stored in a [database](https://en.wikipedia.org/wiki/Database "Database"). Systems differ in the size of the stored speech units; a system that stores [phones](https://en.wikipedia.org/wiki/Phone_(phonetics) "Phone (phonetics)") or [diphones](https://en.wikipedia.org/wiki/Diphone "Diphone") provides the largest output range, but may lack clarity.[_[citation needed](https://en.wikipedia.org/wiki/Wikipedia:Citation\_needed "Wikipedia:Citation needed")_] For specific usage domains, the storage of entire words or sentences allows for high-quality output. Alternatively, a synthesizer can incorporate a model of the [vocal tract](https://en.wikipedia.org/wiki/Vocal_tract "Vocal tract") and other human voice characteristics to create a completely "synthetic" voice output.[[2]](https://en.wikipedia.org/wiki/Text-to-speech#cite_note-2)
+
+The quality of a speech synthesizer is judged by its similarity to the human voice and by its ability to be understood clearly. An intelligible text-to-speech program allows people with [visual impairments](https://en.wikipedia.org/wiki/Visual_impairment "Visual impairment") or [reading disabilities](https://en.wikipedia.org/wiki/Reading_disabilities "Reading disabilities") to listen to written words on a home computer. The earliest computer [operating system](https://en.wikipedia.org/wiki/Operating_system "Operating system") to have included a speech synthesizer was [Unix](https://en.wikipedia.org/wiki/Unix "Unix") in 1974, through the Unix [speak](ht

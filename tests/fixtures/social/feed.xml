@@ -1,0 +1,21 @@
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Hacker News: Front Page</title><link>https://news.ycombinator.com/</link><description>Hacker News RSS</description><docs>https://hnrss.org/</docs><generator>hnrss v2.1.1</generator><lastBuildDate>Mon, 19 Oct 2026 00:44:14 +0000</lastBuildDate><atom:link href="https://hnrss.org/frontpage" rel="self" type="application/rss+xml"></atom:link><item><title><![CDATA[William Gibson and the trademarking of cyberspace]]></title><description><![CDATA[
+<p>Article URL: <a href="https://colo.to/cyberspace.html">https://colo.to/cyberspace.html</a></p>
+<p>Comments URL: <a href="https://news.ycombinator.com/item?id=50146625">https://news.ycombinator.com/item?id=50146625</a></p>
+<p>Points: 21</p>
+<p># Comments: 0</p>
+]]></description><pubDate>Sun, 18 Oct 2026 23:37:57 +0000</pubDate><link>https://colo.to/cyberspace.html</link><dc:creator>Eric_Gullichsen</dc:creator><comments>https://news.ycombinator.com/item?id=50146625</comments><guid isPermaLink="false">https://news.ycombinator.com/item?id=50146625</guid></item>
+<item><title><![CDATA[How RC2's π table was made]]></title><description><![CDATA[
+<p>Article URL: <a href="https://khalidhamadeh.com/writing/rc2-pi-table">https://khalidhamadeh.com/writing/rc2-pi-table</a></p>
+<p>Comments URL: <a href="https://news.ycombinator.com/item?id=50146286">https://news.ycombinator.com/item?id=50146286</a></p>
+<p>Points: 5</p>
+<p># Comments: 1</p>
+]]></description><pubDate>Sun, 18 Oct 2026 22:48:07 +0000</pubDate><link>https://khalidhamadeh.com/writing/rc2-pi-table</link><dc:creator>KhalidH</dc:creator><comments>https://news.ycombinator.com/item?id=50146286</comments><guid isPermaLink="false">https://news.ycombinator.com/item?id=50146286</guid></item>
+<item><title><![CDATA[Show HN: WhatsApp MCP running free on Cloudflare]]></title><description><![CDATA[
+<p>I wanted my humble Claude on mobile to access my WhatsApp messages but the only options I could find either required WhatsApp Business or an actual server to run Baileys on.<p>I wanted to run it for free on ClaudeFlare and with my personal WhatsApp account, so I built this.<p>Important feature - it connects to your Google account as well as WhatsApp to grab the names of all your WhatsApp contacts, otherwise you get only phone numbers for many of them and search doesn't work properly.<p>This is a single user install because it's both gray area and very private - so point your agent at the repo and let it set things up.</p>
+<hr>
+<p>Comments URL: <a href="https://news.ycombinator.com/item?id=50145715">https://news.ycombinator.com/item?id=50145715</a></p>
+<p>Points: 31</p>
+<p># Comments: 21</p>
+]]></description><pubDate>Sun, 18 Oct 2026 21:36:10 +0000</pubDate><link>https://github.com/finereli/whatsapp-mcp</link><dc:creator>zoozla</dc:creator><comments>https://news.ycombinator.com/item?id=50145715</comments><guid isPermaLink="false">https://news.ycombinator.com/item?id=50145715</guid></item>
+</channel>
+</rss>
