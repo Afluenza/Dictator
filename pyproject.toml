@@ -31,5 +31,10 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest==9.1.1"]
 
+[tool.setuptools]
+# Pin discovery: the repo root also holds rea/, extension/ and tests/, which setuptools
+# otherwise sees as extra top-level packages and refuses to build (flat-layout error in CI).
+packages = ["listen_app"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
