@@ -206,6 +206,8 @@ def _read_web(url: str, transport) -> ReadResult:
     if jina.ok:
         jina.note = f"read via Jina Reader (direct fetch was {direct.state})"
         return jina
+    if direct.state == EMPTY and direct.note.endswith("(no such page)"):
+        return direct  # the page is missing; a refused Jina fallback does not change that
     if jina.state == LOGIN_WALL or direct.state == LOGIN_WALL:
         return jina if jina.state == LOGIN_WALL else direct  # a sign-in page outranks a plain empty
     if jina.state == BLOCKED:

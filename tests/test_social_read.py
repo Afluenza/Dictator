@@ -442,6 +442,21 @@ def test_jina_404_warning_is_not_read_as_ok():
     assert result.text == ""
 
 
+def test_a_refused_jina_does_not_turn_a_404_into_blocked():
+    """Direct says the page is missing (404); Jina then refuses anonymous queries (401).
+    The honest answer is that the page is missing, not that the site blocked us."""
+    jina_refused = (401, "application/json",
+                    b'{"data":null,"code":401,"name":"AuthenticationRequiredError",'
+                    b'"readableMessage":"blocked from anonymous queries"}')
+    result = read("https://en.wikipedia.org/wiki/Kokoro_(TTS)",
+                  transport=serves({"https://en.wikipedia.org/wiki/Kokoro_(TTS)":
+                                    (404, "text/html", body_of("soft404_wikipedia.html")),
+                                    "https://r.jina.ai/": jina_refused},
+                                   default=(404, "", b"")))
+    assert result.state == EMPTY
+    assert "404" in result.note
+
+
 def test_a_real_wikipedia_article_still_reads():
     """The guard above must not eat real articles."""
     html = ("<html><head><title>Speech synthesis - Wikipedia</title></head><body><article><p>"
