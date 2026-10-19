@@ -1,1 +1,0 @@
-connector write check, safe to delete (created by REA-INVESTIGATOR 2026-10-19)
