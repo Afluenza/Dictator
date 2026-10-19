@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "listen-app"
+version = "0.1.0"
+description = "Listen app: local text-to-speech with Kokoro-82M (GPL-free path)."
+license = { text = "MIT" }
+requires-python = ">=3.12,<3.13"
+# Pins are the versions installed and tested on this Mac. num2words is LGPL-2.1
+# (approved by the Commander) and is used unmodified as a pip dependency; its
+# COPYING file is the notice. spaCy's `en_core_web_sm` is a local install step.
+dependencies = [
+    "numpy==2.5.4",
+    "onnxruntime==1.31.0",
+    "soundfile==0.14.0",
+    "misaki==0.9.4",
+    "num2words==0.5.14",
+    "spacy==3.8.16",
+    "customtkinter==6.0.0",
+    "darkdetect==0.8.0",
+    "packaging==26.3",
+    "sounddevice==0.5.6",
+    "pdfplumber==0.11.10",
+    "python-docx==1.2.0",
+    "trafilatura==2.3.1",
+    "youtube-transcript-api==1.2.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
