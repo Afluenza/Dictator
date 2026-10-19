@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Dictator: send this page to Listen",
+  "version": "1.0.0",
+  "description": "Read the page, post or comment you are on, or the text you selected, straight into the Dictator Listen app. Nothing leaves this machine.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "action": {
+    "default_title": "Send to Listen",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "commands": {
+    "send-selection": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Send the selected text to Listen"
+    },
+    "send-page": {
+      "suggested_key": { "default": "Alt+Shift+P" },
+      "description": "Send the whole page to Listen"
+    }
+  }
+}
