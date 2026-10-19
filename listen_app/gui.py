@@ -4,6 +4,8 @@ Inputs:
 - Upload File: .txt, .md, .pdf, or .docx, read by listen_app.extract.
 - Paste Link: the URL is fetched and its main text extracted, on a worker thread.
 - Add Text: uses whatever is in the text box.
+- The browser extension: listen_app.bridge listens on 127.0.0.1 for one paired extension and
+  drops a page or its selected text into this window, so nothing has to be copied across by hand.
 
 No cloud import, login, or server. Engine loading, link fetching, and rendering run off
 the Tk thread; widgets are only touched from the Tk thread, via a queue polled with `after`.
@@ -44,9 +46,12 @@ class ListenApp(ctk.CTk):
         self._last_ahead: RenderAhead | None = None  # finished render, kept so Restart replays without rendering
         self._popup: ctk.CTkToplevel | None = None
         self._notes = None  # the Notes window, created on first use
+        self._bridge = None  # the loopback listener the browser extension posts to
+        self._bridge_error = ""
 
         self._build()
         threading.Thread(target=self._load_engine, args=(engine_factory,), daemon=True).start()
+        self._start_bridge()
         self.after(POLL_MS, self._poll)
 
     # ----- layout -------------------------------------------------------
@@ -71,6 +76,12 @@ class ListenApp(ctk.CTk):
             text_color=theme.INK, corner_radius=theme.RADIUS, height=32, font=theme.font(theme.SIZE_BODY),
         )
         self.summarize_button.pack(side="right", padx=4, pady=6)
+        self.browser_button = ctk.CTkButton(
+            header, text="Browser", width=104, image=theme.icon("globe", size=14, color=theme.INK),
+            command=self._on_browser, fg_color=theme.CHROME_HOVER, hover_color=theme.CHROME,
+            text_color=theme.INK, corner_radius=theme.RADIUS, height=32, font=theme.font(theme.SIZE_BODY),
+        )
+        self.browser_button.pack(side="right", padx=4, pady=6)
 
         inputs = ctk.CTkFrame(self, **theme.surface())
         inputs.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -142,6 +153,22 @@ class ListenApp(ctk.CTk):
             self._events.put(("engine_error", f"{type(exc).__name__}: {exc}"))
 
     # ----- Tk-thread event handling ----------------------------------------
+    def _start_bridge(self) -> None:
+        """Open the loopback listener the browser extension posts to.
+
+        A port already in use is reported in the status line and the app carries on; it never
+        blocks the window. The payload callback runs on a request thread, so it only ever puts
+        an event on the queue — Tk is still touched from the Tk thread alone.
+        """
+        from listen_app.bridge import Bridge
+
+        bridge = Bridge(lambda payload: self._events.put(("bridged", payload)))
+        if not bridge.start():
+            self._bridge_error = bridge.error
+            self.status.configure(text=f"Browser bridge off: {bridge.error}")
+            return
+        self._bridge = bridge
+
     def _poll(self) -> None:
         try:
             while True:
@@ -179,6 +206,8 @@ class ListenApp(ctk.CTk):
             self.status.configure(text=str(payload))
         elif kind == "finished":
             self._finish(payload)
+        elif kind == "bridged":
+            self._on_bridged(payload)
         elif kind == "done":
             self._busy = False
             self.progress.set(0)
@@ -266,6 +295,38 @@ class ListenApp(ctk.CTk):
             self.status.configure(text=str(exc))
             return
         self._extract_async(lambda: read_text(url), f"Loaded {url}", "Reading link...", source_url=url)
+
+    def _on_bridged(self, payload: dict) -> None:
+        """A page or its selected text arrived from the browser extension.
+
+        The payload was already narrowed by listen_app.bridge: `text` carries the page's own text
+        and the URL it came from, `url` carries only a link. A link goes through exactly the same
+        social_read route as Paste Link — free anonymous routes, login-only hosts never fetched —
+        so the extension cannot reach anything the window would not.
+        """
+        if payload["kind"] == "text":
+            title = payload.get("title") or ""
+            self._extract_async(lambda: payload["text"], f"Loaded from browser: {title}" if title
+                                else "Loaded from browser", "Receiving from browser...",
+                                source_url=payload.get("url", ""))
+            return
+        from listen_app.social_read import read_text
+
+        url = payload["url"]
+        self.url_entry.delete(0, "end")
+        self.url_entry.insert(0, url)
+        self._extract_async(lambda: read_text(url), f"Loaded {url}", "Reading the link you sent...",
+                            source_url=url)
+
+    def _on_browser(self) -> None:
+        """Whether the extension is listening, and the pairing code it needs. Nothing is sent anywhere."""
+        if self._bridge is None:
+            self.status.configure(text=f"Browser bridge off: {self._bridge_error or 'not started'}. "
+                                       "Close the other copy of Listen and reopen this one.")
+            return
+        from listen_app.bridge_dialog import show_pairing
+
+        show_pairing(self, self._bridge.code, self._bridge.endpoint)
 
     def _extract_async(self, job: Callable[[], str], ok_status: str, busy_status: str,
                        source_url: str = "") -> None:
