@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Send to Listen</title>
+  <style>
+    /* One sheet, the same tokens as listen_app/theme.py: lavender chrome, dark cards, one accent. */
+    :root {
+      --body: #17141C;
+      --surface: #2A2433;
+      --surface-hi: #3A3343;
+      --surface-hover: #4A4356;
+      --input: #1E1A24;
+      --accent: #3478F6;
+      --accent-hover: #2A63D0;
+      --ink: #1C1622;
+      --text: #F2F0F5;
+      --text-dim: #A9A1B6;
+      --chrome: #9B8AAB;
+      --radius: 8px;
+      --radius-sm: 6px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      width: 320px;
+      margin: 0;
+      background: var(--body);
+      color: var(--text);
+      font: 12px/1.45 -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--chrome);
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    header .dot { width: 8px; height: 8px; border-radius: 50%; background: #2DB55F; }
+    header .dot.off { background: #B4472F; }
+    main { padding: 12px 14px 14px; display: grid; gap: 8px; }
+    .card { background: var(--surface); border-radius: var(--radius); padding: 10px 12px; }
+    button {
+      font: inherit;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 9px 12px;
+      border: 0;
+      border-radius: var(--radius);
+      cursor: pointer;
+      background: var(--surface-hi);
+      color: var(--text);
+      transition: background .12s ease;
+    }
+    button:hover { background: var(--surface-hover); }
+    button.primary { background: var(--accent); color: #fff; }
+    button.primary:hover { background: var(--accent-hover); }
+    button:disabled { opacity: .55; cursor: default; }
+    .muted { color: var(--text-dim); font-size: 11px; }
+    .row { display: flex; gap: 6px; align-items: center; }
+    input {
+      font: inherit;
+      flex: 1;
+      min-width: 0;
+      background: var(--input);
+      color: var(--text);
+      border: 1px solid var(--surface-hi);
+      border-radius: var(--radius);
+      padding: 7px 9px;
+    }
+    input::placeholder { color: var(--text-dim); }
+    #status { min-height: 16px; }
+    #status.ok { color: #61C877; }
+    #status.bad { color: #E4795F; }
+    .hidden { display: none; }
+    h2 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header><span class="dot off" id="dot"></span><span id="headline">Send to Listen</span></header>
+  <main>
+    <section class="card">
+      <h2 id="pair-title">Pair with the app</h2>
+      <div class="row">
+        <input id="code" placeholder="Paste the pairing code" autocomplete="off" spellcheck="false">
+        <button id="save" class="primary" style="width:auto;padding:7px 12px">Pair</button>
+      </div>
+      <p class="muted">Press <b>Browser</b> in Listen to see the code.</p>
+    </section>
+
+    <button id="send-text" class="primary">Send this page to Listen</button>
+    <button id="send-link">Send the link only</button>
+    <p class="muted" id="status" role="status" aria-live="polite"></p>
+  </main>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
