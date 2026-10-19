@@ -133,7 +133,9 @@ class _Server(ThreadingHTTPServer):
 
     daemon_threads = True
     request_queue_size = 64
-    allow_reuse_address = True
+    # On Windows SO_REUSEADDR lets a second process bind a port already in use (port hijack),
+    # so it is set only where it is the safe restart option.
+    allow_reuse_address = os.name != "nt"
 
 
 def make_handler(token: str, on_payload: Callable[[dict], None]):

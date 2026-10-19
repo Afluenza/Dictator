@@ -137,6 +137,8 @@ def icon(name: str, color: str = TEXT, size: int = ICON_SIZE) -> ctk.CTkImage:
     if picture is None:
         picture = _draw(name, color, size)
         _PICTURES[key] = picture
+    # The CTkImage is built per call: it is bound to the Tk root that exists now. Caching it
+    # across roots left dangling 'pyimage' references once a window was destroyed (Windows CI).
     return ctk.CTkImage(light_image=picture, dark_image=picture, size=(size, size))
 
 

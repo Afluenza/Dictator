@@ -5,6 +5,7 @@ so the gates are proven by traffic, not by reading the source. Nothing here need
 """
 
 import json
+import os
 import socket
 import threading
 import time
@@ -207,7 +208,8 @@ def test_the_saved_token_is_reused_across_launches(tmp_path):
     first = bridge.load_token(config)
     assert len(first) == 48
     assert bridge.load_token(config) == first
-    assert oct(config.stat().st_mode)[-3:] == "600"
+    if os.name != "nt":  # Windows ignores POSIX modes; the token lives in the user profile instead
+        assert oct(config.stat().st_mode)[-3:] == "600"
 
 
 def test_a_missing_or_broken_config_gets_a_fresh_token(tmp_path):

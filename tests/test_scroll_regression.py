@@ -36,12 +36,16 @@ def _timebox(seconds: int):
     def _fire(_signum, _frame):
         raise _Timeout()
 
+    if not hasattr(signal, "SIGALRM"):  # Windows: no alarm; the timed asserts still run
+        return None
     previous = signal.signal(signal.SIGALRM, _fire)
     signal.alarm(seconds)
     return previous
 
 
 def _unbox(previous) -> None:
+    if previous is None:
+        return
     signal.alarm(0)
     signal.signal(signal.SIGALRM, previous)
 
