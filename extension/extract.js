@@ -26,8 +26,6 @@ function dictatorExtract(options) {
     // X / Twitter
     ["x.com", '[data-testid="tweetText"]'],
     ["twitter.com", '[data-testid="tweetText"]'],
-    // Reddit: the post body first, then the comment the reader opened
-    ["reddit.com", '[data-testid="post-content"] , .Post header + div, [slot="text-body"]'],
     // LinkedIn, Mastodon, Bluesky, Threads
     ["linkedin.com", ".feed-shared-update-v2__description, .attributed-text-segment-list__content"],
     ["mastodon.", ".status__content, .entry__content"],
@@ -42,9 +40,98 @@ function dictatorExtract(options) {
     // Article/Talk/Read/Edit tabs sit in the surrounding <main>, so reading <main> sends them too
     ["wikipedia.org", "#mw-content-text"],
     // Video and media pages
-    ["youtube.com", "#description-inline-expander, ytd-text-inline-expander, #description"],
     ["bilibili.com", ".desc-info-text, .basic-desc-info"],
   ];
+
+  // Hosts where the page is a post with a conversation under it. The post body alone loses the
+  // replies, and the whole <main> drags in the sidebar and the site chrome, so the two are read
+  // separately and joined. Measured live in Chromium 2026-10-20.
+  const THREADS = [
+    {
+      host: "reddit.com",
+      // old.reddit is kept as a fallback: the redesign serves <shreddit-post>, and a logged-out
+      // or legacy view can still serve the old markup.
+      post: ['shreddit-post [slot="text-body"]', '[data-testid="post-content"]', ".usertext-body"],
+      comments: ['shreddit-comment [slot="comment"]', ".comment .usertext-body"],
+    },
+    {
+      host: "youtube.com",
+      post: ["#description-inline-expander", "ytd-text-inline-expander", "#description"],
+      comments: ["ytd-comment-thread-renderer #content-text", "ytd-comment-view-model #content-text"],
+    },
+    {
+      // Facebook renders the post and the comments it has loaded inside one role="article", so the
+      // container is read whole and no separate comment scan runs: scanning would duplicate the
+      // post text under "Comments:". Unverified — a signed-in session is needed to confirm the
+      // markup, and the generic paths take over when this selector finds nothing.
+      host: "facebook.com",
+      post: ['div[role="article"]'],
+      comments: [],
+    },
+    {
+      // Instagram post pages are an <article> holding the caption and the loaded comments. Same
+      // reasoning as Facebook, and the same caveat: unverified until a signed-in run.
+      host: "instagram.com",
+      post: ["article"],
+      comments: [],
+    },
+    {
+      // Discord is a message list, not a post: every message is a reply. messageContent holds the
+      // message text only, so the author line and the timestamp stay out. Unverified until a
+      // signed-in run on discord.com/channels.
+      host: "discord.com",
+      post: ['ol[data-list-id="chat-messages"] [class*="messageContent"]'],
+      comments: [],
+      each: true,
+    },
+  ];
+
+  // Hosts that show a sign-in wall to a logged-out reader instead of the post. Their wall page is
+  // a short marketing/login page, which the generic paths would send as if it were the article.
+  const LOGIN_HOSTS = ["facebook.com", "instagram.com", "discord.com", "x.com", "twitter.com",
+    "linkedin.com", "threads.net"];
+  const LOGIN_WALL_MAX_CHARS = 1500;
+  // A signed-in page always carries its own content container. Requiring that container to be
+  // absent is what keeps a short real post from being refused for merely quoting "sign in".
+  const LOGIN_CONTENT = [
+    ["facebook.com", 'div[role="article"]'],
+    ["instagram.com", "article"],
+    ["discord.com", 'ol[data-list-id="chat-messages"]'],
+    ["x.com", '[data-testid="tweetText"]'],
+    ["twitter.com", '[data-testid="tweetText"]'],
+    ["linkedin.com", ".feed-shared-update-v2__description, .attributed-text-segment-list__content"],
+    ["threads.net", 'div[dir="auto"] span'],
+  ];
+
+  // A page that no longer exists still answers HTTP 200 on many sites, and a content script never
+  // sees the status, so the wording is the only signal. Measured live 2026-10-20: bbc.com's 404 was
+  // extracted as 2158 characters of article, because the page is wordy and has real paragraphs.
+  const NOT_FOUND = [
+    /error 404\b/i,
+    /\b404 not found\b/i,
+    /page not found/i,
+    /we can't find the page/i,
+    /couldn't find that page/i,
+    /page you're looking for is no longer here/i,
+    /this page (does not|doesn't) exist/i,
+  ];
+  // The marker has to be near the top, where a site puts its own not-found notice, and the page
+  // has to be small. An article ABOUT 404 pages is long, so the length ceiling keeps it readable.
+  const NOT_FOUND_HEAD = 500;
+  const NOT_FOUND_MAX_CHARS = 6000;
+
+  // Comments are capped twice over: a count ceiling so the top replies are what arrives, and a
+  // character ceiling so a long thread cannot crowd the post body out of LIMIT.
+  const MAX_COMMENTS = 8;
+  const COMMENT_MAX_CHARS = 600;
+  const COMMENT_BUDGET = 6000;
+
+  // YouTube ships the full description in the player JSON on the page, while the visible box is
+  // collapsed to about 370 characters behind a "more" button. The JSON is read from the page and
+  // parsed only for that one field, so nothing is clicked or fetched. The size guard keeps a page
+  // with an unexpectedly huge script from being scanned.
+  const SHORT_DESCRIPTION = /"shortDescription":"((?:[^"\\]|\\.)*)"/;
+  const YT_JSON_MAX = 8000000;
 
   function visible(el) {
     if (!el || !el.getBoundingClientRect) return false;
@@ -95,6 +182,107 @@ function dictatorExtract(options) {
       if (text.length >= 200) return text;
     }
     return "";
+  }
+
+  // Each match of a selector in document order, deduplicated by text. A quote-reply on Reddit
+  // repeats the comment it answers, and the same reply can be reached by two selectors.
+  function fromEach(selectors, max, maxChars) {
+    const seen = new Set();
+    const parts = [];
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        if (!visible(el)) continue;
+        let text = tidy(el.innerText);
+        if (text.length < 2) continue;
+        if (text.length > maxChars) text = text.slice(0, maxChars).trim() + "…";
+        const key = text.slice(0, 120);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        parts.push(text);
+        if (parts.length >= max) return parts;
+      }
+    }
+    return parts;
+  }
+
+  // YouTube's watch page carries the whole description in the player response, which the site
+  // leaves in a <script>. The visible expander is collapsed to a few hundred characters and the
+  // full text sits in a hidden node, so the script is the honest source. The field is decoded as a
+  // JSON string so \n and \u escapes come back as characters.
+  function fromYouTubeDescription() {
+    for (const script of document.querySelectorAll("script")) {
+      const body = script.textContent || "";
+      if (body.length > YT_JSON_MAX || body.indexOf("shortDescription") < 0) continue;
+      const found = SHORT_DESCRIPTION.exec(body);
+      if (!found) continue;
+      let decoded = "";
+      try {
+        decoded = JSON.parse('"' + found[1] + '"');
+      } catch (error) {
+        decoded = found[1];
+      }
+      const text = tidy(decoded);
+      if (text.length >= 20) return text;
+    }
+    return "";
+  }
+
+  // A logged-out Facebook, Instagram, Discord or X page is a sign-in card: short, no post, and it
+  // carries its own wording. Sending it would put "Log in to see this" in a note as if it were the
+  // post, so it is refused as "login". A page that carries a real post is long, so it is kept.
+  function isLoginWall() {
+    if (!LOGIN_HOSTS.some((pattern) => hostMatches(host, pattern))) return false;
+    const all = tidy(document.body ? document.body.innerText : "");
+    if (!all || all.length > LOGIN_WALL_MAX_CHARS) return false;
+    // "sign in" is in the pattern because Facebook and Instagram word their card that way rather
+    // than "log in"; the container check below is what keeps a real post out of this branch.
+    if (!/log ?in|sign ?in|sign ?up|create (a )?new account/i.test(all)) return false;
+    return !LOGIN_CONTENT.some(([pattern, selector]) =>
+      hostMatches(host, pattern) && document.querySelectorAll(selector).length > 0);
+  }
+
+  // A not-found page is refused as "missing", the same verdict a dead link gets, so the reader
+  // says there was no page instead of summarising the site's 404 copy.
+  function isNotFoundPage() {
+    const all = tidy(document.body ? document.body.innerText : "");
+    if (!all || all.length > NOT_FOUND_MAX_CHARS) return false;
+    return NOT_FOUND.some((pattern) => pattern.test(all.slice(0, NOT_FOUND_HEAD)));
+  }
+
+  // The top replies, under a heading, or "" when the site keeps them inside the post container
+  // (Facebook, Instagram) or the page has none. Bounded by COMMENT_BUDGET so the post keeps room.
+  function commentsBlock(site) {
+    if (!site.comments.length) return "";
+    const comments = fromEach(site.comments, MAX_COMMENTS, COMMENT_MAX_CHARS);
+    const kept = [];
+    let used = 0;
+    for (const comment of comments) {
+      if (used + comment.length > COMMENT_BUDGET) break;
+      used += comment.length;
+      kept.push(comment);
+    }
+    return kept.length ? "\n\nComments:\n\n" + kept.join("\n\n") : "";
+  }
+
+  // The post body (or, on Discord, the visible messages), then the top replies.
+  function fromThread(site) {
+    let post = "";
+    for (const selector of site.post) {
+      if (site.each) {
+        const messages = fromEach([selector], MAX_COMMENTS, COMMENT_MAX_CHARS);
+        if (messages.length) {
+          post = messages.join("\n\n");
+          break;
+        }
+        continue;
+      }
+      post = fromSelector(selector);
+      // A real post can be one short line ("Title only" posts have no body at all), so the floor is
+      // minimal here; the caller's 20-character floor still rejects a page with nothing usable.
+      if (post.length >= 2) break;
+      post = "";
+    }
+    return post ? post + commentsBlock(site) : "";
   }
 
   // The generic fallback: the container with the most real prose in it. Picking the single
@@ -203,6 +391,27 @@ function dictatorExtract(options) {
   }
   if (!text && isMissingPage()) {
     return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "missing", truncated: false };
+  }
+  if (!text && isNotFoundPage()) {
+    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "missing", truncated: false };
+  }
+  if (!text && isLoginWall()) {
+    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "login", truncated: false };
+  }
+  if (!text) {
+    const site = THREADS.find((entry) => hostMatches(host, entry.host));
+    if (site) {
+      // A YouTube description comes from the page's own player JSON, because the visible box is
+      // collapsed; the collapsed box is only the fallback.
+      const described = site.host === "youtube.com" ? fromYouTubeDescription() : "";
+      const thread = described
+        ? described + commentsBlock(site)
+        : fromThread(site);
+      if (thread.length >= 20) {
+        text = thread;
+        how = hostMatches(host, "youtube.com") ? "video" : "post";
+      }
+    }
   }
   if (!text) {
     for (const [pattern, selector] of SOCIAL) {

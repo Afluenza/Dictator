@@ -91,11 +91,22 @@ export async function sendPage(mode = "auto") {
   }
   const page = results && results[0] && results[0].result;
   if (!page || !page.text || page.text.trim().length < 2) {
-    return { ok: false, message: "Found no text on the page. Select the part you want, then send again." };
+    // extract.js names why it refused a page instead of sending the site's sign-in or 404 copy as
+    // if it were the post. Saying so is the difference between "nothing here" and "log in first".
+    const why = {
+      login: "This page is a sign-in wall. Log in, then send again.",
+      missing: "That page does not exist, so there is nothing to read.",
+      wall: "The site served a bot check instead of the page. Reload it, then send again.",
+    }[page && page.how];
+    return { ok: false, message: why || "Found no text on the page. Select the part you want, then send again." };
   }
   const trimmed = page.truncated ? " (trimmed to 60,000 characters)" : "";
   const sent = await send({ kind: "text", text: page.text, url: page.url, title: page.title });
-  return sent.ok ? { ok: true, message: `Sent ${page.how} to Listen${trimmed}.` } : sent;
+  const what = {
+    selection: "the selection", post: "the post", video: "the video",
+    main: "the page", page: "the page", shadow: "the page",
+  }[page.how] || "the page";
+  return sent.ok ? { ok: true, message: `Sent ${what} to Listen${trimmed}.` } : sent;
 }
 
 /* Send only the link, so the app reads it through its own anonymous route. */
