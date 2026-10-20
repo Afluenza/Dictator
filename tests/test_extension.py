@@ -806,6 +806,7 @@ def test_a_page_that_is_not_youtube_never_asks_for_the_reveal(tmp_path):
 
 ORCHESTRATION = r"""
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 const dir = process.argv[2];
 const extractSrc = readFileSync(`${dir}/extract.js`, "utf8");
 
@@ -865,7 +866,9 @@ globalThis.fetch = async (url, init) => {
   if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
   return { ok: true, status: 200, json: async () => ({ ok: true, chars: 1 }) };
 };
-const client = await import(`${dir}/client.js?t=${Date.now()}`);
+// A dynamic import needs a file:// URL on Windows: an absolute "D:\..." path is refused by the
+// default ESM loader. Found in CI on windows-latest.
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
 const result = await client.sendPage("page");
 console.log(JSON.stringify({ result, calls, text: sent[0] ? sent[0].text : "", leftAt: page.scrolledTo }));
 """
