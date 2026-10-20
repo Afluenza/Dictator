@@ -843,7 +843,10 @@ globalThis.chrome = {
   tabs: { query: async () => [{ id: 7, url: "https://www.youtube.com/watch?v=abc" }] },
   scripting: {
     executeScript: async ({ files, func, args }) => {
-      calls.push(files ? "inject" : String(func).includes("scrollIntoView") ? "reveal" : "extract");
+      calls.push(files ? "inject"
+        : String(func).includes("scrollIntoView") ? "reveal"
+        : String(func).includes("ytd-comment-thread-renderer") ? "poll"
+        : "extract");
       if (files) {
         globalThis.location = page.world.location;
         globalThis.document = page.world.document;
@@ -855,6 +858,9 @@ globalThis.chrome = {
         page.revealed = true;
         page.scrollY = 3000;
         return [{ result: null }];
+      }
+      if (String(func).includes("ytd-comment-thread-renderer")) {
+        return [{ result: page.revealed }];
       }
       const opts = { preferSelection: args[0] };
       if (args.length > 1) opts.restoreScrollTo = args[1];
@@ -887,7 +893,7 @@ def test_the_popup_reveals_the_comments_then_reads_again_and_restores_the_scroll
                          encoding="utf-8", timeout=60)
     assert run.returncode == 0, run.stderr[:600]
     out = json.loads(run.stdout)
-    assert out["calls"] == ["inject", "extract", "reveal", "extract"], out["calls"]
+    assert out["calls"] == ["inject", "extract", "reveal", "poll", "extract"], out["calls"]
     assert out["result"]["ok"] is True
     assert out["result"]["message"] == "Sent the video to Listen."
     assert "The description of the video." in out["text"]

@@ -105,7 +105,17 @@ export async function sendPage(mode = "auto") {
           if (!window.scrollY) window.scrollTo(0, document.documentElement.scrollHeight);
         },
       });
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      // Wait for the comments to actually mount rather than guessing a delay: a fixed 2.5 s was
+      // measured sufficient in a fresh tab and not sufficient in a normal one, where the video is
+      // playing. Polling stops as soon as they appear, and gives up after 7 s.
+      for (let waited = 0; waited < 7000; waited += 400) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        const ready = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => document.querySelectorAll("ytd-comment-thread-renderer").length > 0,
+        });
+        if (ready && ready[0] && ready[0].result) break;
+      }
       results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: (preferSelection, restoreScrollTo) =>
