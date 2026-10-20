@@ -109,7 +109,9 @@ function dictatorExtract(options) {
     let best = null;
     let bestScore = 0;
     for (const el of candidates) {
-      if (!visible(el) || el === document.body) continue;
+      // The document root and body are wrappers, never the content. Scoring them lets a page's
+      // whole link directory tie the prose block, so the wrapper is skipped and the block wins.
+      if (!visible(el) || el === document.body || el === document.documentElement) continue;
       const paragraphs = el.querySelectorAll("p, li, blockquote");
       let prose = 0;
       let linked = 0;
@@ -134,13 +136,62 @@ function dictatorExtract(options) {
     return body.length >= 40 ? body : "";
   }
 
+  // Web components keep their text in an open shadow root, which innerText does not cross, so a
+  // page built from them reads as empty. This runs only when every other path found nothing, so
+  // ordinary pages are untouched. Closed shadow roots are not reachable and are not read.
+  function fromOpenShadowRoots() {
+    const parts = [];
+    const walk = (node) => {
+      for (const el of node.querySelectorAll("*")) {
+        if (el.shadowRoot) {
+          const text = tidy(el.shadowRoot.textContent || "");
+          if (text.length >= 20) parts.push(text);
+          walk(el.shadowRoot);
+        }
+      }
+    };
+    walk(document);
+    return parts.join("\n\n");
+  }
+
   function hostMatches(host, pattern) {
     return host === pattern || host.endsWith("." + pattern) || host.includes(pattern);
+  }
+
+  // A bot-check or challenge page carries its own text ("Performing security verification"),
+  // which the generic paths would read as the article. Such a page is refused as "wall", so the
+  // reader says it found no article instead of sending the challenge to Listen. A selection the
+  // user made is never refused: the user chose that text.
+  const CHALLENGE = [
+    /performing security verification/i,
+    /verify(ing)? you are (not )?(a )?human/i,
+    /checking your browser before accessing/i,
+    /just a moment\.\.\./i,
+    /enable javascript and cookies to continue/i,
+  ];
+
+  // A challenge page is short: the phrase plus a few lines of boilerplate. An article that merely
+  // mentions the phrase is long, so only a short page can be refused. The length ceiling is what
+  // keeps real prose safe.
+  const CHALLENGE_MAX_CHARS = 800;
+
+  // Three facts must all hold: the page is short, it carries the challenge phrase, and it has at
+  // most one paragraph. A challenge is one boilerplate block. An article has several paragraphs
+  // of prose, so even a short article that quotes the phrase is never refused.
+  function isChallengePage() {
+    const all = tidy(document.body ? document.body.innerText : "");
+    if (all.length > CHALLENGE_MAX_CHARS) return false;
+    if (!CHALLENGE.some((pattern) => pattern.test(all))) return false;
+    const paragraphs = Array.from(document.querySelectorAll("p")).filter((p) => (p.textContent || "").trim().length > 0);
+    return paragraphs.length <= 1;
   }
 
   const host = location.hostname.toLowerCase();
   let text = preferSelection ? fromSelection() : "";
   let how = text ? "selection" : "";
+  if (!text && isChallengePage()) {
+    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "wall", truncated: false };
+  }
   if (!text) {
     for (const [pattern, selector] of SOCIAL) {
       if (!hostMatches(host, pattern)) continue;
@@ -159,6 +210,10 @@ function dictatorExtract(options) {
   if (!text) {
     text = fromBlocks();
     how = text ? "page" : "";
+  }
+  if (!text) {
+    text = fromOpenShadowRoots();
+    how = text ? "shadow" : "";
   }
 
   const truncated = text.length > LIMIT;

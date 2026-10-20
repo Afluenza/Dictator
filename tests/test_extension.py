@@ -289,3 +289,78 @@ def test_white_space_is_tidied_not_sent_raw(tmp_path):
         "body": {"children": []},
     }, tmp_path)
     assert result["text"] == "line one with runs\n\nline two"
+
+
+def test_a_link_list_does_not_beat_the_prose_block(tmp_path):
+    """A page whose links outnumber its prose must not return the link list as the article.
+
+    Regression, found in Chromium: the wrapper <html> ties the prose block on score and was
+    scanned first, so the whole body (link directory included) won. The document root is a
+    wrapper, never the content, so it is excluded from the scan.
+    """
+    result = extract({
+        "url": "https://example.com/dir", "host": "example.com",
+        "body": {"children": [
+            {"tag": "div", "attrs": {"id": "m"}, "children": [
+                {"tag": "p", "children": [{"tag": "a", "text": "Directory entry alpha link words"}]},
+                {"tag": "p", "children": [{"tag": "a", "text": "Directory entry beta link words"}]},
+            ]},
+            {"tag": "div", "attrs": {"id": "prose"}, "children": [
+                para("The real prose paragraph that the reader wants to keep, long enough to score. " * 4),
+            ]},
+        ]},
+    }, tmp_path)
+    assert "The real prose paragraph" in result["text"]
+    assert "Directory entry alpha" not in result["text"]
+
+
+
+def test_the_text_of_a_closed_or_empty_page_is_not_invented(tmp_path):
+    """A page with nothing readable still reports no text, so the caller says so."""
+    result = extract({"url": "https://example.com/empty2", "host": "example.com",
+                      "body": {"children": [{"tag": "img"}]}}, tmp_path)
+    assert result["text"] == ""
+    assert result["how"] == ""
+
+
+def test_a_bot_challenge_page_is_refused_not_read_as_the_article(tmp_path):
+    """A short bot-check page must not be sent as if it were the article.
+
+    Regression, found live: a Cloudflare "Performing security verification" page (HTTP 403) was
+    extracted as 256 characters of page text and would have been sent to Listen.
+    """
+    result = extract({
+        "url": "https://example.com/blocked", "host": "example.com",
+        "body": {"children": [
+            {"tag": "h1", "text": "example.com"},
+            {"tag": "p", "text": "Performing security verification. This website uses a security "
+                                 "service to protect against malicious bots."},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "wall"
+    assert result["text"] == ""
+
+
+def test_an_article_that_only_mentions_the_phrase_is_still_read(tmp_path):
+    """A real article that quotes the challenge wording has several paragraphs, so it is kept."""
+    body = [para("Sites often show a page saying Performing security verification before a reader "
+                 "gets in, which many readers find annoying when they only want the article. " * 2)]
+    body += [para("Another real paragraph of article prose that keeps the page an article. " * 4)
+             for _ in range(3)]
+    result = extract({
+        "url": "https://example.com/discuss", "host": "example.com",
+        "body": {"children": [{"tag": "article", "children": body}]},
+    }, tmp_path)
+    assert result["how"] != "wall"
+    assert "Another real paragraph" in result["text"]
+
+
+def test_a_user_selection_on_a_challenge_page_is_still_sent(tmp_path):
+    """The user chose the text, so a selection is never refused by the challenge guard."""
+    result = extract({
+        "url": "https://example.com/blocked", "host": "example.com",
+        "selection": "a sentence the user picked",
+        "body": {"children": [{"tag": "p", "text": "Performing security verification."}]},
+    }, tmp_path)
+    assert result["how"] == "selection"
+    assert result["text"] == "a sentence the user picked"
