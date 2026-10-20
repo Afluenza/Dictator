@@ -38,6 +38,9 @@ function dictatorExtract(options) {
     ["stackexchange.com", ".js-post-body"],
     ["news.ycombinator.com", ".commtext, .toptext"],
     ["v2ex.com", ".topic_content, .reply_content"],
+    // Wikipedia: the article lives in #mw-content-text; the language count and the
+    // Article/Talk/Read/Edit tabs sit in the surrounding <main>, so reading <main> sends them too
+    ["wikipedia.org", "#mw-content-text"],
     // Video and media pages
     ["youtube.com", "#description-inline-expander, ytd-text-inline-expander, #description"],
     ["bilibili.com", ".desc-info-text, .basic-desc-info"],

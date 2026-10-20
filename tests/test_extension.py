@@ -396,3 +396,24 @@ def test_a_real_wikipedia_article_is_still_read(tmp_path):
     }, tmp_path)
     assert result["how"] == "main"
     assert "artificial production of human speech" in result["text"]
+
+
+def test_wikipedia_interface_menus_are_not_read_as_the_article(tmp_path):
+    """The article's own text must come first, without the page's menus in front of it.
+
+    Found live in Opera GX, Wikipedia "Speech synthesis": the <main> element starts with the
+    language count, the Article/Talk/Read/Edit tabs and the Appearance controls, then the article.
+    The reader sent all of it as the page, so the note began with menu labels.
+    """
+    menus = ["54 languages", "Article", "Talk", "Read", "Edit", "View history", "Tools",
+             "Appearance hide", "Text", "Small", "Standard", "Large", "Width", "Wide", "Color"]
+    result = extract({
+        "url": "https://en.wikipedia.org/wiki/Speech_synthesis", "host": "en.wikipedia.org",
+        "body": {"children": [{"tag": "main", "children": [
+            *[{"tag": "span", "text": label} for label in menus],
+            {"tag": "div", "attrs": {"id": "mw-content-text"}, "children": [
+                para("Speech synthesis is the artificial production of human speech. " * 6)]},
+        ]}]},
+    }, tmp_path)
+    assert result["how"] == "post"  # the Wikipedia selector, which runs before the generic <main> scan
+    assert result["text"].startswith("Speech synthesis is the artificial production of human speech")
