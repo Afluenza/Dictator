@@ -89,7 +89,34 @@ export async function sendPage(mode = "auto") {
   } catch (error) {
     return { ok: false, message: `Cannot read this page: ${error.message}` };
   }
-  const page = results && results[0] && results[0].result;
+  let page = results && results[0] && results[0].result;
+  // YouTube mounts its comments only once they approach the viewport, so the first pass asks for a
+  // second one: reveal the comments section, give it time to load, then read again with the tab
+  // restored to where the reader had it.
+  if (page && page.revealComments) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          // #below first: at a narrow window the document's first ytd-comments is the hidden
+          // engagement-panel copy, and scrolling to it moves nothing.
+          const box = document.querySelector("#below #comments, #below ytd-comments, ytd-comments");
+          if (box) box.scrollIntoView({ block: "start" });
+          if (!window.scrollY) window.scrollTo(0, document.documentElement.scrollHeight);
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (preferSelection, restoreScrollTo) =>
+          globalThis.dictatorExtract({ preferSelection, restoreScrollTo }),
+        args: [mode === "auto", page.scrollY || 0],
+      });
+      page = (results && results[0] && results[0].result) || page;
+    } catch {
+      // The reveal is best effort: if it fails, the description already read is still sent.
+    }
+  }
   if (!page || !page.text || page.text.trim().length < 2) {
     // extract.js names why it refused a page instead of sending the site's sign-in or 404 copy as
     // if it were the post. Saying so is the difference between "nothing here" and "log in first".

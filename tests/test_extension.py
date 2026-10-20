@@ -742,3 +742,101 @@ def test_the_popup_says_why_a_page_was_refused():
     # a successful send names what was read, so "Sent video" does not say "Sent main"
     for kind in ["selection", "post", "video", "main"]:
         assert f'{kind}:' in client, kind
+
+
+def test_a_youtube_page_whose_comments_have_not_loaded_asks_for_a_second_pass(tmp_path):
+    """YouTube mounts comments only as they approach the viewport.
+
+    Measured live 2026-10-20: a fully loaded watch page had 0 comment renderers, and 20 once the
+    comments section was scrolled to. The first pass therefore asks for a second one, and carries
+    the tab's own scroll position so it can be put back.
+    """
+    result = extract({
+        "url": "https://www.youtube.com/watch?v=abc", "host": "www.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"A description long enough to be read."}'},
+            {"tag": "ytd-comments", "children": [{"tag": "div", "text": "Comments loading"}]},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "video"
+    assert result["revealComments"] is True
+    assert result["scrollY"] == 0  # a real 0, not a missing field
+
+
+def test_a_youtube_page_that_already_has_comments_does_not_ask_for_a_second_pass(tmp_path):
+    result = extract({
+        "url": "https://www.youtube.com/watch?v=abc", "host": "www.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"A description long enough to be read."}'},
+            {"tag": "ytd-comments", "children": [
+                {"tag": "ytd-comment-thread-renderer", "children": [
+                    {"tag": "yt-element", "attrs": {"id": "content-text"},
+                     "text": "A real comment that had already loaded."}]}]},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is False
+    assert result["scrollY"] is None
+
+
+def test_a_second_pass_is_never_requested_from_itself(tmp_path):
+    """Pass two must not ask for pass three, or the popup would loop."""
+    result = extract({
+        "url": "https://www.youtube.com/watch?v=abc", "host": "www.youtube.com",
+        "options": {"restoreScrollTo": 0},
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"A description long enough to be read."}'},
+            {"tag": "ytd-comments", "children": [{"tag": "div", "text": "Comments loading"}]},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is False
+
+
+def test_a_page_that_is_not_youtube_never_asks_for_the_reveal(tmp_path):
+    result = extract({
+        "url": "https://www.reddit.com/r/x/comments/a/b/", "host": "www.reddit.com",
+        "body": {"children": [
+            {"tag": "shreddit-post", "children": [
+                {"tag": "div", "attrs": {"slot": "text-body"}, "text": "Post body here."}]},
+            {"tag": "shreddit-comment", "children": [
+                {"tag": "div", "attrs": {"slot": "comment"}, "text": "A reply."}]},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is False
+
+
+def test_the_popup_reveals_the_comments_then_reads_again_and_restores_the_scroll():
+    """The two-pass contract, read from the shipped client.js.
+
+    A second pass that forgot to pass the saved position back would leave the reader's tab
+    scrolled down the page, which is a real cost of reading comments.
+    """
+    client = (EXT / "client.js").read_text(encoding="utf-8")
+    assert "revealComments" in client
+    assert "scrollIntoView" in client
+    assert "restoreScrollTo" in client
+    # the reveal is bounded by a timer, not retried, and a failure keeps the first-pass text
+    assert "setTimeout" in client
+    assert "|| page" in client
+
+
+def test_the_reveal_targets_the_visible_comments_not_the_hidden_panel_copy(tmp_path):
+    """At a narrow window the document's first ytd-comments is a hidden panel copy at the top.
+
+    Measured live 2026-10-20 at 720x588: scrolling to `ytd-comments` scrolled nothing (its chain is
+    inside #panels, 0 px tall), so the comments never mounted. #below's copy is the real one.
+    """
+    result = extract({
+        "url": "https://www.youtube.com/watch?v=abc", "host": "www.youtube.com",
+        "body": {"children": [
+            {"tag": "div", "attrs": {"id": "panels"}, "children": [
+                {"tag": "ytd-comments", "hidden": True, "text": ""}]},
+            {"tag": "div", "attrs": {"id": "below"}, "children": [
+                {"tag": "ytd-comments", "children": [{"tag": "div", "text": "Comments loading"}]}]},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is True
+
+    client = (EXT / "client.js").read_text(encoding="utf-8")
+    assert "#below #comments" in client, "the reveal must aim at the visible comments container"
+    # and a container that refuses to scroll still gets the window moved as a fallback
+    assert "documentElement.scrollHeight" in client

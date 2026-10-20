@@ -18,6 +18,21 @@ function dictatorExtract(options) {
   // A non-simple parameter list cannot carry a "use strict" directive, so the default is set here.
   const preferSelection = !options || options.preferSelection !== false;
 
+  // Second half of the comment reveal: the popup passes back the position it saved, so the tab is
+  // left exactly where the reader found it. Always run, whatever the extraction decided.
+  const restoreScrollTo = options && typeof options.restoreScrollTo === "number"
+    ? options.restoreScrollTo : null;
+  const finish = (result) => {
+    if (restoreScrollTo !== null) {
+      try {
+        window.scrollTo(0, restoreScrollTo);
+      } catch (error) {
+        // A page that refuses the scroll is left where it is; the reading is unaffected.
+      }
+    }
+    return result;
+  };
+
   // A hard ceiling, matching listen_app.bridge.MAX_TEXT. The bridge refuses more, so trimming
   // here turns a refusal into a page the reader actually gets.
   const LIMIT = 60000;
@@ -285,6 +300,22 @@ function dictatorExtract(options) {
     return post ? post + commentsBlock(site) : "";
   }
 
+  // YouTube only mounts its comments after they scroll near the viewport: measured live 2026-10-20,
+  // a watch page that had finished loading still had zero comment renderers until the comments
+  // section was scrolled to, and then had 20. So the first pass reports where the tab was, and the
+  // caller scrolls, waits, and calls again with restoreScrollTo — the tab ends where the reader
+  // left it. Only YouTube needs this; Reddit renders its thread up front.
+  //
+  // The selector is #below's copy on purpose: at a narrow window the FIRST ytd-comments in the
+  // document is the hidden engagement-panel one inside #panels (0 px tall, at the top), so
+  // scrolling to it does nothing at all. Measured live 2026-10-20 at 720x588.
+  const YT_COMMENTS = "#below #comments, #below ytd-comments, ytd-comments";
+  function needsCommentReveal() {
+    if (!hostMatches(host, "youtube.com")) return false;
+    if (!document.querySelectorAll(YT_COMMENTS).length) return false;
+    return document.querySelectorAll("ytd-comment-thread-renderer").length === 0;
+  }
+
   // The generic fallback: the container with the most real prose in it. Picking the single
   // longest paragraph was wrong on a comment thread, where one long comment beat the post, and
   // on an index page, where the longest paragraph is a teaser. Scoring containers by their
@@ -387,16 +418,16 @@ function dictatorExtract(options) {
   let text = preferSelection ? fromSelection() : "";
   let how = text ? "selection" : "";
   if (!text && isChallengePage()) {
-    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "wall", truncated: false };
+    return finish({ text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "wall", truncated: false });
   }
   if (!text && isMissingPage()) {
-    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "missing", truncated: false };
+    return finish({ text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "missing", truncated: false });
   }
   if (!text && isNotFoundPage()) {
-    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "missing", truncated: false };
+    return finish({ text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "missing", truncated: false });
   }
   if (!text && isLoginWall()) {
-    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "login", truncated: false };
+    return finish({ text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "login", truncated: false });
   }
   if (!text) {
     const site = THREADS.find((entry) => hostMatches(host, entry.host));
@@ -440,12 +471,21 @@ function dictatorExtract(options) {
   const truncated = text.length > LIMIT;
   if (truncated) text = text.slice(0, LIMIT);
 
-  return {
+  // The first pass on a YouTube page whose comments have not mounted yet asks for a second pass
+  // rather than sending the description alone.
+  // Compare against null, not truthiness: a saved position of 0 is the common case (the reader was
+  // at the top), and treating it as "no restore" made this pass ask for another one, forever.
+  const reveal = restoreScrollTo === null && needsCommentReveal();
+  return finish({
     text,
     // empty when nothing was read, so the caller says so instead of sending a blank page
     url: location.href,
     title: (document.title || "").slice(0, 300),
     how,
     truncated,
-  };
+    // 0 is the honest answer "the tab has not been scrolled", which the caller cannot tell from
+    // a missing field, so the flag travels with it.
+    revealComments: reveal,
+    scrollY: reveal ? Math.round(window.scrollY || 0) : null,
+  });
 }
