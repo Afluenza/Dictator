@@ -804,19 +804,92 @@ def test_a_page_that_is_not_youtube_never_asks_for_the_reveal(tmp_path):
     assert result["revealComments"] is False
 
 
-def test_the_popup_reveals_the_comments_then_reads_again_and_restores_the_scroll():
-    """The two-pass contract, read from the shipped client.js.
+ORCHESTRATION = r"""
+import { readFileSync } from "node:fs";
+const dir = process.argv[2];
+const extractSrc = readFileSync(`${dir}/extract.js`, "utf8");
 
-    A second pass that forgot to pass the saved position back would leave the reader's tab
-    scrolled down the page, which is a real cost of reading comments.
+const page = { scrollY: 0, revealed: false, scrolledTo: null };
+page.world = {
+  location: { href: "https://www.youtube.com/watch?v=abc", hostname: "www.youtube.com" },
+  document: {
+    title: "A video",
+    body: { innerText: "watch page" },
+    documentElement: { scrollHeight: 4000 },
+    querySelectorAll: (sel) => {
+      if (sel.includes("ytd-comment-thread-renderer")) {
+        return page.revealed
+          ? [{ innerText: "A top comment.", getBoundingClientRect: () => ({ width: 9, height: 9 }) }]
+          : [];
+      }
+      if (sel.includes("ytd-comments") || sel.includes("#comments")) return [{}];
+      if (sel.includes("script")) {
+        return [{ textContent: '{"shortDescription":"The description of the video."}' }];
+      }
+      return [];
+    },
+    querySelector: () => null,
+  },
+  getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  getSelection: () => ({ rangeCount: 0, isCollapsed: true, toString: () => "" }),
+  scrollTo: (x, y) => { page.scrolledTo = y; page.scrollY = y; },
+};
+
+const calls = [];
+const sent = [];
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 7, url: "https://www.youtube.com/watch?v=abc" }] },
+  scripting: {
+    executeScript: async ({ files, func, args }) => {
+      calls.push(files ? "inject" : String(func).includes("scrollIntoView") ? "reveal" : "extract");
+      if (files) {
+        globalThis.location = page.world.location;
+        globalThis.document = page.world.document;
+        globalThis.window = page.world;
+        page.world.dictatorExtract = new Function(`${extractSrc}; return dictatorExtract;`)();
+        return [{ result: null }];
+      }
+      if (String(func).includes("scrollIntoView")) {
+        page.revealed = true;
+        page.scrollY = 3000;
+        return [{ result: null }];
+      }
+      const opts = { preferSelection: args[0] };
+      if (args.length > 1) opts.restoreScrollTo = args[1];
+      return [{ result: page.world.dictatorExtract(opts) }];
+    },
+  },
+};
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
+  return { ok: true, status: 200, json: async () => ({ ok: true, chars: 1 }) };
+};
+const client = await import(`${dir}/client.js?t=${Date.now()}`);
+const result = await client.sendPage("page");
+console.log(JSON.stringify({ result, calls, text: sent[0] ? sent[0].text : "", leftAt: page.scrolledTo }));
+"""
+
+
+def test_the_popup_reveals_the_comments_then_reads_again_and_restores_the_scroll(tmp_path):
+    """The shipped client.js, executed against a stubbed chrome API, not read.
+
+    A second pass that forgot to hand the saved position back would leave the reader's tab
+    scrolled down the page; a first pass that ignored revealComments would send the description
+    alone. Both are caught here by running the real file.
     """
-    client = (EXT / "client.js").read_text(encoding="utf-8")
-    assert "revealComments" in client
-    assert "scrollIntoView" in client
-    assert "restoreScrollTo" in client
-    # the reveal is bounded by a timer, not retried, and a failure keeps the first-pass text
-    assert "setTimeout" in client
-    assert "|| page" in client
+    script = tmp_path / "orchestration.mjs"
+    script.write_text(ORCHESTRATION, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT)], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    out = json.loads(run.stdout)
+    assert out["calls"] == ["inject", "extract", "reveal", "extract"], out["calls"]
+    assert out["result"]["ok"] is True
+    assert out["result"]["message"] == "Sent the video to Listen."
+    assert "The description of the video." in out["text"]
+    assert "Comments:" in out["text"] and "A top comment." in out["text"]
+    assert out["leftAt"] == 0, "the tab must be put back where the reader had it"
 
 
 def test_the_reveal_targets_the_visible_comments_not_the_hidden_panel_copy(tmp_path):
