@@ -72,7 +72,8 @@ def test_the_popup_and_worker_are_real_scripts():
     """An extension whose popup script does not parse fails silently in the browser."""
     for name in ["popup.js", "client.js", "background.js", "extract.js"]:
         path = EXT / name
-        check = subprocess.run([node(), "--check", str(path)], capture_output=True, text=True)
+        check = subprocess.run([node(), "--check", str(path)], capture_output=True, text=True,
+                               encoding="utf-8")
         assert check.returncode == 0, f"{name}: {check.stderr[:400]}"
 
 
@@ -204,8 +205,11 @@ def extract(scenario: dict, tmp_path: Path) -> dict:
     harness.write_text(HARNESS, encoding="utf-8")
     page = tmp_path / "page.json"
     page.write_text(json.dumps(scenario), encoding="utf-8")
+    # encoding="utf-8" is load-bearing: without it Python decodes Node's UTF-8 output with the
+    # host's own codec, and on Windows (cp1252) an em dash came back mangled, failing the one test
+    # that checks a \u2014 escape. Found in CI on windows-latest 2026-10-20.
     run = subprocess.run([node(), str(harness), str(page), str(EXT / "extract.js")],
-                         capture_output=True, text=True, timeout=60)
+                         capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert run.returncode == 0, run.stderr[:600]
     return json.loads(run.stdout)
 
