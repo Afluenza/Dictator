@@ -186,11 +186,20 @@ function dictatorExtract(options) {
     return paragraphs.length <= 1;
   }
 
+  // A Wikipedia page for a title that does not exist carries #noarticletext. A real article never
+  // does, so this is a clean, structural test rather than a phrase match.
+  function isMissingPage() {
+    return document.querySelectorAll("#noarticletext").length > 0;
+  }
+
   const host = location.hostname.toLowerCase();
   let text = preferSelection ? fromSelection() : "";
   let how = text ? "selection" : "";
   if (!text && isChallengePage()) {
     return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "wall", truncated: false };
+  }
+  if (!text && isMissingPage()) {
+    return { text: "", url: location.href, title: (document.title || "").slice(0, 300), how: "missing", truncated: false };
   }
   if (!text) {
     for (const [pattern, selector] of SOCIAL) {
