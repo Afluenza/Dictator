@@ -364,3 +364,35 @@ def test_a_user_selection_on_a_challenge_page_is_still_sent(tmp_path):
     }, tmp_path)
     assert result["how"] == "selection"
     assert result["text"] == "a sentence the user picked"
+
+
+def test_a_missing_wikipedia_article_is_refused_not_read_as_the_article(tmp_path):
+    """A page that does not exist must not be sent as if it were the article.
+
+    Regression, found live in Chromium: en.wikipedia.org/wiki/Kokoro_(TTS) (no such article) was
+    extracted as 1211 characters of "does not have an article" text with how "main". Wikipedia marks
+    the missing page with #noarticletext, and a real article does not carry it.
+    """
+    result = extract({
+        "url": "https://en.wikipedia.org/wiki/Kokoro_(TTS)", "host": "en.wikipedia.org",
+        "body": {"children": [
+            {"tag": "article", "children": [
+                {"tag": "div", "attrs": {"id": "noarticletext"},
+                 "text": "Wikipedia does not have an article with this exact name."},
+                para("Look for Kokoro (TTS) on one of Wikipedia's sister projects. " * 4),
+            ]},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "missing"
+    assert result["text"] == ""
+
+
+def test_a_real_wikipedia_article_is_still_read(tmp_path):
+    """A real article has no #noarticletext marker, so it is kept."""
+    result = extract({
+        "url": "https://en.wikipedia.org/wiki/Speech_synthesis", "host": "en.wikipedia.org",
+        "body": {"children": [{"tag": "article", "children": [
+            para("Speech synthesis is the artificial production of human speech. " * 6)]}]},
+    }, tmp_path)
+    assert result["how"] == "main"
+    assert "artificial production of human speech" in result["text"]
