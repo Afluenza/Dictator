@@ -89,13 +89,61 @@ export async function sendPage(mode = "auto") {
   } catch (error) {
     return { ok: false, message: `Cannot read this page: ${error.message}` };
   }
-  const page = results && results[0] && results[0].result;
+  let page = results && results[0] && results[0].result;
+  // YouTube mounts its comments only once they approach the viewport, so the first pass asks for a
+  // second one: reveal the comments section, give it time to load, then read again with the tab
+  // restored to where the reader had it.
+  if (page && page.revealComments) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          // #below first: at a narrow window the document's first ytd-comments is the hidden
+          // engagement-panel copy, and scrolling to it moves nothing.
+          const box = document.querySelector("#below #comments, #below ytd-comments, ytd-comments");
+          if (box) box.scrollIntoView({ block: "start" });
+          if (!window.scrollY) window.scrollTo(0, document.documentElement.scrollHeight);
+        },
+      });
+      // Wait for the comments to actually mount rather than guessing a delay: a fixed 2.5 s was
+      // measured sufficient in a fresh tab and not sufficient in a normal one, where the video is
+      // playing. Polling stops as soon as they appear, and gives up after 7 s.
+      for (let waited = 0; waited < 7000; waited += 400) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        const ready = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => document.querySelectorAll("ytd-comment-thread-renderer").length > 0,
+        });
+        if (ready && ready[0] && ready[0].result) break;
+      }
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (preferSelection, restoreScrollTo) =>
+          globalThis.dictatorExtract({ preferSelection, restoreScrollTo }),
+        args: [mode === "auto", page.scrollY || 0],
+      });
+      page = (results && results[0] && results[0].result) || page;
+    } catch {
+      // The reveal is best effort: if it fails, the description already read is still sent.
+    }
+  }
   if (!page || !page.text || page.text.trim().length < 2) {
-    return { ok: false, message: "Found no text on the page. Select the part you want, then send again." };
+    // extract.js names why it refused a page instead of sending the site's sign-in or 404 copy as
+    // if it were the post. Saying so is the difference between "nothing here" and "log in first".
+    const why = {
+      login: "This page is a sign-in wall. Log in, then send again.",
+      missing: "That page does not exist, so there is nothing to read.",
+      wall: "The site served a bot check instead of the page. Reload it, then send again.",
+    }[page && page.how];
+    return { ok: false, message: why || "Found no text on the page. Select the part you want, then send again." };
   }
   const trimmed = page.truncated ? " (trimmed to 60,000 characters)" : "";
   const sent = await send({ kind: "text", text: page.text, url: page.url, title: page.title });
-  return sent.ok ? { ok: true, message: `Sent ${page.how} to Listen${trimmed}.` } : sent;
+  const what = {
+    selection: "the selection", post: "the post", video: "the video",
+    main: "the page", page: "the page", shadow: "the page",
+  }[page.how] || "the page";
+  return sent.ok ? { ok: true, message: `Sent ${what} to Listen${trimmed}.` } : sent;
 }
 
 /* Send only the link, so the app reads it through its own anonymous route. */
