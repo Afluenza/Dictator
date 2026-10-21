@@ -134,6 +134,11 @@ function dictatorExtract(options) {
     /couldn't find that page/i,
     /page you're looking for is no longer here/i,
     /this page (does not|doesn't) exist/i,
+    // Google Docs words a dead file id this way and carries no other marker. Measured live
+    // 2026-10-20: docs.google.com/document/d/<dead>/edit was read as 116 characters of "Sorry,
+    // the file you have requested does not exist." with how "page".
+    /the file you have requested does not exist/i,
+    /(requested|this) (file|document) (does not|doesn't) exist/i,
   ];
   // The marker has to be near the top, where a site puts its own not-found notice, and the page
   // has to be small. An article ABOUT 404 pages is long, so the length ceiling keeps it readable.
@@ -400,6 +405,13 @@ function dictatorExtract(options) {
     /checking your browser before accessing/i,
     /just a moment\.\.\./i,
     /enable javascript and cookies to continue/i,
+    // Reddit's logged-out challenge. Measured live 2026-10-20: reddit.com/r/python/comments/1/
+    // was read as 186 characters of "Prove your humanity / We're committed to safety and
+    // security. But not for bots..." with how "page".
+    /prove you(?:'re| are) (?:a )?human/i,
+    // Google's traffic wall on a search URL.
+    /(systems have )?detected unusual traffic/i,
+    /this page (checks|appears when google automatically detects)/i,
   ];
 
   // A challenge page is short: the phrase plus a few lines of boilerplate. An article that merely
@@ -407,15 +419,23 @@ function dictatorExtract(options) {
   // keeps real prose safe.
   const CHALLENGE_MAX_CHARS = 800;
 
-  // Three facts must all hold: the page is short, it carries the challenge phrase, and it has at
-  // most one paragraph. A challenge is one boilerplate block. An article has several paragraphs
-  // of prose, so even a short article that quotes the phrase is never refused.
+  // Three facts must all hold: the page is short, it carries the challenge phrase, and it does
+  // not look like real prose. A challenge is one boilerplate block plus a line or two of help
+  // text; an article that merely mentions the phrase arrives as several filled paragraphs.
+  //
+  // The earlier version counted *any* paragraph and required at most one. That is what let two
+  // live walls through on 2026-10-20: Reddit's "Prove your humanity" page and Google's "unusual
+  // traffic" page each ship two or three <p> elements, so both were sent as page text.
+  const CHALLENGE_PROSE_PARAGRAPHS = 3;
+  const CHALLENGE_PROSE_MIN_CHARS = 80;
   function isChallengePage() {
     const all = tidy(document.body ? document.body.innerText : "");
     if (all.length > CHALLENGE_MAX_CHARS) return false;
     if (!CHALLENGE.some((pattern) => pattern.test(all))) return false;
-    const paragraphs = Array.from(document.querySelectorAll("p")).filter((p) => (p.textContent || "").trim().length > 0);
-    return paragraphs.length <= 1;
+    const filled = Array.from(document.querySelectorAll("p"))
+      .map((p) => tidy(p.textContent || ""))
+      .filter((text) => text.length >= CHALLENGE_PROSE_MIN_CHARS);
+    return filled.length < CHALLENGE_PROSE_PARAGRAPHS;
   }
 
   // A Wikipedia page for a title that does not exist carries #noarticletext. A real article never

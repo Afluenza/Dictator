@@ -956,3 +956,185 @@ def test_a_mobile_youtube_page_with_the_sheet_closed_reads_only_the_description(
     }, tmp_path)
     assert result["how"] == "video"
     assert "Comments:" not in result["text"]
+
+
+# ----- round 22: walls and missing pages the phrase list missed --------------
+# Each of these was measured live in Chromium on 2026-10-20 and came back as readable page text
+# before the fix. They are behaviour tests: the shipped extract.js runs against a fake DOM.
+
+
+def test_reddits_prove_your_humanity_challenge_is_refused(tmp_path):
+    """Regression, live 2026-10-20: reddit.com/r/python/comments/1/ was read as 186 characters.
+
+    The old challenge guard allowed at most one paragraph, and Reddit's page carries two, so the
+    phrase check was never reached. The page is refused as a wall, not sent as the article.
+    """
+    result = extract({
+        "url": "https://www.reddit.com/r/python/comments/1/", "host": "www.reddit.com",
+        "title": "Reddit - Please wait for verification",
+        "body": {"children": [
+            {"tag": "h1", "text": "Prove your humanity"},
+            {"tag": "p", "text": "We're committed to safety and security. But not for bots. "
+                                 "Please prove you're human to continue."},
+            {"tag": "p", "text": "Reddit uses a security service to protect itself from "
+                                 "online attacks."},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "wall", result["text"][:120]
+    assert result["text"] == ""
+
+
+def test_a_real_reddit_thread_that_mentions_the_challenge_wording_is_still_read(tmp_path):
+    """The paragraph rule must not become a false positive: real prose is several full paragraphs."""
+    body = [para("A long post about scraping, where the author explains that Reddit now shows a "
+                 "page saying Prove your humanity before you can read a thread at all. " * 2)]
+    body += [para("A second and third real paragraph of the post, each with its own argument "
+                  "and enough words to count as prose on the page. " * 2) for _ in range(3)]
+    result = extract({
+        "url": "https://www.reddit.com/r/python/comments/x/y", "host": "www.reddit.com",
+        "body": {"children": [
+            {"tag": "div", "attrs": {"data-testid": "post-content"}, "children": body},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "post", result["how"]
+    assert "A second and third real paragraph" in result["text"]
+
+
+def test_googles_unusual_traffic_page_is_refused(tmp_path):
+    """Regression, live 2026-10-20: google.com/search?q=... was read as 340 characters of the wall.
+
+    No challenge or not-found phrase matched it, so the traffic check text was sent as page body.
+    """
+    result = extract({
+        "url": "https://www.google.com/search?q=speech+synthesis", "host": "www.google.com",
+        "body": {"children": [
+            {"tag": "div", "text": "About this page"},
+            {"tag": "p", "text": "Our systems have detected unusual traffic from your computer "
+                                 "network. This page checks to see if it's really you sending the "
+                                 "requests, and not a robot."},
+            {"tag": "p", "text": "Why did this happen? This page appears when Google "
+                                 "automatically detects requests coming from your computer "
+                                 "network which appear to be in violation of the Terms of Service."},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "wall", result["text"][:120]
+    assert result["text"] == ""
+
+
+def test_a_google_docs_file_that_does_not_exist_is_refused(tmp_path):
+    """Regression, live 2026-10-20: docs.google.com/document/d/<dead>/edit answered HTTP 404 with
+    "Sorry, the file you have requested does not exist." and was read as 116 characters of page."""
+    result = extract({
+        "url": "https://docs.google.com/document/d/1/edit", "host": "docs.google.com",
+        "title": "Google Docs",
+        "body": {"children": [
+            {"tag": "div", "text": "Sorry, the file you have requested does not exist."},
+            {"tag": "p", "text": "Make sure that you have the correct URL and that the file exists."},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "missing", result["text"][:120]
+    assert result["text"] == ""
+
+
+NAVIGATION = r"""
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const mode = process.argv[3];   // "once" or "forever"
+const extractSrc = readFileSync(`${dir}/extract.js`, "utf8");
+const page = { boom: mode === "forever", attempts: 0 };
+const MAIL = "Inbox: three messages, one from Sam about the deployment window. ";
+
+// A page with a real <main>, because the extractor only accepts a region with 200+ characters.
+class El {
+  constructor(tag, text, children = []) {
+    this.tag = tag; this.text = text || ""; this.children = children;
+    for (const c of children) c.parent = this;
+  }
+  get innerText() { return this.text || this.children.map((c) => c.innerText).join("\n"); }
+  get textContent() { return this.innerText; }
+  getBoundingClientRect() { return { width: 100, height: 100 }; }
+  querySelectorAll(sel) {
+    const tags = sel.split(",").map((s) => s.trim().toLowerCase());
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { if (tags.includes(c.tag)) out.push(c); walk(c); } };
+    walk(this);
+    return out;
+  }
+}
+function buildPage() {
+  const main = new El("main", MAIL.repeat(6));
+  const body = new El("body", "", [main]);
+  return { body, main };
+}
+const dom = buildPage();
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 9, url: "https://outlook.live.com/mail/" }] },
+  scripting: {
+    executeScript: async ({ files, func }) => {
+      // The inject step always succeeds; it is the evaluate that dies when the document swaps.
+      if (files) {
+        globalThis.location = { href: "https://outlook.live.com/mail/", hostname: "outlook.live.com" };
+        globalThis.document = {
+          title: "Mail",
+          body: dom.body,
+          activeElement: null,
+          querySelectorAll: (s) => dom.body.querySelectorAll(s),
+        };
+        globalThis.window = {
+          getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+          getSelection: () => ({ rangeCount: 0, isCollapsed: true, toString: () => "" }),
+        };
+        globalThis.dictatorExtract = new Function(`${extractSrc}; return dictatorExtract;`)();
+        return [{ result: null }];
+      }
+      page.attempts += 1;
+      // "forever" keeps throwing on every attempt; "once" throws only on the first.
+      if (page.boom || page.attempts === 1) {
+        throw new Error("Execution context was destroyed.");
+      }
+      return [{ result: globalThis.dictatorExtract({}) }];
+    },
+  },
+};
+const sent = [];
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
+  return { ok: true, status: 200, json: async () => ({ ok: true, chars: 30 }) };
+};
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+const result = await client.sendPage("page");
+console.log(JSON.stringify({ result, attempts: page.attempts, sent: sent.length }));
+"""
+
+
+def _navigate(tmp_path: Path, mode: str) -> dict:
+    script = tmp_path / "navigation.mjs"
+    script.write_text(NAVIGATION, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT), mode], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    return json.loads(run.stdout)
+
+
+def test_a_page_that_navigates_mid_read_is_read_on_one_retry(tmp_path):
+    """Regression, live 2026-10-20: outlook.live.com/mail/ threw "Execution context was destroyed".
+
+    That is the page replacing its own document, not a page we cannot read, so one retry is made
+    after the navigation settles and the second read is what gets sent.
+    """
+    out = _navigate(tmp_path, "once")
+    assert out["result"]["ok"] is True, out["result"]
+    assert out["attempts"] == 2, out["attempts"]
+    assert out["sent"] == 1
+
+
+def test_a_page_that_keeps_navigating_is_reported_as_a_redirect_not_retried_forever(tmp_path):
+    """A stuck redirect is named as one, and the read is not attempted a third time."""
+    out = _navigate(tmp_path, "forever")
+    assert out["result"]["ok"] is False
+    assert "sign-in" in out["result"]["message"]
+    assert out["attempts"] == 2, out["attempts"]
+    assert out["sent"] == 0
+
