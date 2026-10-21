@@ -711,6 +711,46 @@ def test_a_logged_out_linkedin_feed_is_refused(tmp_path):
     assert result["text"] == ""
 
 
+def test_a_logged_out_gmail_tab_is_refused_not_sent_as_page_text(tmp_path):
+    """Logging out of Gmail lands you on Google's accounts sign-in card, not on mail.google.com.
+
+    Measured live in Chromium 2026-10-20: mail.google.com and mail.google.com/mail/u/0/ both
+    redirect to accounts.google.com/v3/signin/identifier, whose body was 128 characters ("Loading
+    Sign in to continue to Gmail Email or phone Forgot email? Next Create account English (United
+    States) Help Privacy Terms"). Neither host was in LOGIN_HOSTS, so the card was read as the page.
+    """
+    for host in ["accounts.google.com", "mail.google.com"]:
+        result = extract({
+            "url": f"https://{host}/v3/signin/identifier", "host": host,
+            "body": {"children": [{"tag": "div", "text":
+                                   "Loading Sign in to continue to Gmail Email or phone "
+                                   "Forgot email? Next Create account English (United States) "
+                                   "Help Privacy Terms"}]},
+        }, tmp_path)
+        assert result["how"] == "login", host
+        assert result["text"] == "", host
+
+
+def test_a_real_gmail_mailbox_is_not_refused_as_a_sign_in_wall(tmp_path):
+    """The 1500-character wall ceiling must keep a signed-in mailbox out of the refusal.
+
+    No signed-in session was available in this run, so this page stands in for one rather than
+    being measured: 120 message rows plus the folder list, far over the ceiling.
+    """
+    rows = [{"tag": "tr", "text": f"Sender {i} — Subject line {i} — first line of the message body"}
+            for i in range(120)]
+    result = extract({
+        "url": "https://mail.google.com/mail/u/0/#inbox", "host": "mail.google.com",
+        "body": {"children": [
+            {"tag": "div", "attrs": {"role": "main"}, "children": [
+                {"tag": "table", "children": rows},
+            ]},
+        ]},
+    }, tmp_path)
+    assert result["how"] != "login"
+    assert "Subject line 0" in result["text"]
+
+
 def test_a_short_x_post_that_mentions_signing_in_is_still_read(tmp_path):
     """The login guard must not refuse a real post just because it is short and says "log in".
 
