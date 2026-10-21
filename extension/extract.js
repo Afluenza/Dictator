@@ -72,7 +72,12 @@ function dictatorExtract(options) {
     {
       host: "youtube.com",
       post: ["#description-inline-expander", "ytd-text-inline-expander", "#description"],
-      comments: ["ytd-comment-thread-renderer #content-text", "ytd-comment-view-model #content-text"],
+      // Mobile YouTube (m.youtube.com, the layout a phone-sized or mobile UA request receives) has
+      // its own tags: comments are ytm-comment-renderer and only exist after the reader taps the
+      // comments teaser to open its sheet. Measured live 2026-10-20. They are read when they are
+      // there; this extractor never opens the sheet itself, because that changes the reader's page.
+      comments: ["ytd-comment-thread-renderer #content-text", "ytd-comment-view-model #content-text",
+        "ytm-comment-renderer .YtmCommentRendererContent", "ytm-comment-renderer [class*='CommentRendererContent']"],
     },
     {
       // Facebook renders the post and the comments it has loaded inside one role="article", so the
@@ -296,6 +301,11 @@ function dictatorExtract(options) {
       // minimal here; the caller's 20-character floor still rejects a page with nothing usable.
       if (post.length >= 2) break;
       post = "";
+    }
+    // Mobile YouTube has no #description-inline-expander: the description sits in the crawler
+    // description node, and the page's own player JSON is used for the full text when it is there.
+    if (!post && hostMatches(host, "youtube.com")) {
+      post = fromSelector("ytm-crawler-description, ytm-expandable-video-description-body-renderer");
     }
     return post ? post + commentsBlock(site) : "";
   }

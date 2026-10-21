@@ -922,3 +922,37 @@ def test_the_reveal_targets_the_visible_comments_not_the_hidden_panel_copy(tmp_p
     assert "#below #comments" in client, "the reveal must aim at the visible comments container"
     # and a container that refuses to scroll still gets the window moved as a fallback
     assert "documentElement.scrollHeight" in client
+
+
+def test_a_mobile_youtube_page_reads_its_own_comment_markup(tmp_path):
+    """Opera GX is served m.youtube.com, whose tags are not the desktop ones.
+
+    Measured live 2026-10-20 on m.youtube.com: comments are ytm-comment-renderer with the text in
+    .YtmCommentRendererContent, and they only exist after the reader opens the comments sheet. The
+    extractor reads them when they are there and never opens the sheet itself.
+    """
+    result = extract({
+        "url": "https://m.youtube.com/watch?v=abc", "host": "m.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"The description of the video."}'},
+            {"tag": "ytm-comment-renderer", "children": [
+                {"tag": "button", "attrs": {"class": "YtmCommentRendererContent"},
+                 "text": "A mobile comment about the video that long enough to read."}]},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "video"
+    assert "The description of the video." in result["text"]
+    assert "Comments:" in result["text"]
+    assert "A mobile comment about the video" in result["text"]
+
+
+def test_a_mobile_youtube_page_with_the_sheet_closed_reads_only_the_description(tmp_path):
+    """With the comments sheet closed there are no comment nodes, and nothing is invented."""
+    result = extract({
+        "url": "https://m.youtube.com/watch?v=abc", "host": "m.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"The description of the video."}'},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "video"
+    assert "Comments:" not in result["text"]
