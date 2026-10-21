@@ -69,6 +69,45 @@ export async function send(payload) {
   return { ok: false, message: body.error || `Listen refused it (${response.status}).` };
 }
 
+/* Chrome's wording when the document being scripted is replaced mid-call. A page that navigates
+ * itself (a mailbox redirecting to sign-in, a dashboard replacing its shell) hits this; a page we
+ * genuinely cannot script does not. Matched on the message because the error arrives as a plain
+ * object from the API, not a typed exception. */
+function isContextDestroyed(error) {
+  const message = String((error && error.message) || error || "");
+  return /execution context was destroyed|frame (was|has been) removed|no tab with id/i.test(message);
+}
+
+/* Wait until the tab's document has finished loading, polling rather than sleeping a fixed time.
+ * Bounded: a page that never settles returns so the read can be attempted (or reported) anyway.
+ * Failures here are swallowed because the wait is a courtesy to the page, not the delivery. */
+async function waitForReady(tabId, ceilingMs) {
+  for (let waited = 0; waited < ceilingMs; waited += 400) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    try {
+      const state = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => document.readyState,
+      });
+      if (state && state[0] && state[0].result === "complete") return;
+    } catch {
+      // The document is mid-swap; try again on the next tick.
+    }
+  }
+}
+
+/* Inject extract.js, then read the value back. Two injections share one isolated world, so the
+ * extraction stays a readable file instead of being copied inline here. */
+async function injectAndExtract(tabId, preferSelection) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["extract.js"] });
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (prefer) => globalThis.dictatorExtract({ preferSelection: prefer }),
+    args: [preferSelection],
+  });
+  return results;
+}
+
 /* Extract the page in the active tab and send it. "auto" prefers a selection, "page" ignores it. */
 export async function sendPage(mode = "auto") {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -77,17 +116,31 @@ export async function sendPage(mode = "auto") {
   }
   let results;
   try {
-    // extract.js is injected first and declares dictatorExtract; the second call reads it back.
-    // Two injections share one isolated world, so the extraction stays a readable file instead of
-    // being copied inline here.
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["extract.js"] });
-    results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: (preferSelection) => globalThis.dictatorExtract({ preferSelection }),
-      args: [mode === "auto"],
-    });
+    results = await injectAndExtract(tab.id, mode === "auto");
   } catch (error) {
-    return { ok: false, message: `Cannot read this page: ${error.message}` };
+    // A mailbox or a dashboard navigates itself after load, and an evaluate into a document that
+    // is being replaced fails with "Execution context was destroyed". That is the page moving,
+    // not a page we cannot read, so it gets one retry once the navigation settles. Any other
+    // error is reported exactly as it came.
+    if (!isContextDestroyed(error)) {
+      return { ok: false, message: `Cannot read this page: ${error.message}` };
+    }
+    // Measured on outlook.live.com/mail/ 2026-10-20: the redirect to the product page only
+    // settled about 5 s in (readyState still "interactive" at 1.5 s), and a fixed 900 ms retry
+    // read the outgoing document and found nothing. So wait for the new document to finish
+    // loading instead of guessing a delay, with a ceiling so a page that never settles is still
+    // reported rather than hanging the popup.
+    await waitForReady(tab.id, 6000);
+    try {
+      results = await injectAndExtract(tab.id, mode === "auto");
+    } catch (retry) {
+      return {
+        ok: false,
+        message: isContextDestroyed(retry)
+          ? "This page is redirecting, most likely to a sign-in screen. Open it, sign in, then send again."
+          : `Cannot read this page: ${retry.message}`,
+      };
+    }
   }
   let page = results && results[0] && results[0].result;
   // YouTube mounts its comments only once they approach the viewport, so the first pass asks for a
