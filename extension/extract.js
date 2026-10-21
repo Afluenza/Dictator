@@ -409,6 +409,10 @@ function dictatorExtract(options) {
     // was read as 186 characters of "Prove your humanity / We're committed to safety and
     // security. But not for bots..." with how "page".
     /prove you(?:'re| are) (?:a )?human/i,
+    // Reddit's other wall, served to this network at the same URL on 2026-10-20 while the
+    // "Prove your humanity" page was being probed: 143 characters of refusal that the old code
+    // read as page text.
+    /you've been blocked by network security/i,
     // Google's traffic wall on a search URL.
     /(systems have )?detected unusual traffic/i,
     /this page (checks|appears when google automatically detects)/i,

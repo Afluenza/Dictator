@@ -78,6 +78,24 @@ function isContextDestroyed(error) {
   return /execution context was destroyed|frame (was|has been) removed|no tab with id/i.test(message);
 }
 
+/* Wait until the tab's document has finished loading, polling rather than sleeping a fixed time.
+ * Bounded: a page that never settles returns so the read can be attempted (or reported) anyway.
+ * Failures here are swallowed because the wait is a courtesy to the page, not the delivery. */
+async function waitForReady(tabId, ceilingMs) {
+  for (let waited = 0; waited < ceilingMs; waited += 400) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    try {
+      const state = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => document.readyState,
+      });
+      if (state && state[0] && state[0].result === "complete") return;
+    } catch {
+      // The document is mid-swap; try again on the next tick.
+    }
+  }
+}
+
 /* Inject extract.js, then read the value back. Two injections share one isolated world, so the
  * extraction stays a readable file instead of being copied inline here. */
 async function injectAndExtract(tabId, preferSelection) {
@@ -107,7 +125,12 @@ export async function sendPage(mode = "auto") {
     if (!isContextDestroyed(error)) {
       return { ok: false, message: `Cannot read this page: ${error.message}` };
     }
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    // Measured on outlook.live.com/mail/ 2026-10-20: the redirect to the product page only
+    // settled about 5 s in (readyState still "interactive" at 1.5 s), and a fixed 900 ms retry
+    // read the outgoing document and found nothing. So wait for the new document to finish
+    // loading instead of guessing a delay, with a ceiling so a page that never settles is still
+    // reported rather than hanging the popup.
+    await waitForReady(tab.id, 6000);
     try {
       results = await injectAndExtract(tab.id, mode === "auto");
     } catch (retry) {

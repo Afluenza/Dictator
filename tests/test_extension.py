@@ -1089,9 +1089,18 @@ globalThis.chrome = {
         globalThis.dictatorExtract = new Function(`${extractSrc}; return dictatorExtract;`)();
         return [{ result: null }];
       }
+      // The readiness poll client.js makes before its retry. Measured on outlook.live.com/mail/
+      // 2026-10-20: readyState was still "interactive" 1.5 s in and "complete" about 5 s in, so
+      // the new document is modelled as settling on the third tick (400 ms each).
+      if (String(func).includes("readyState")) {
+        page.polls = (page.polls || 0) + 1;
+        return [{ result: page.boom || page.polls >= 3 ? "complete" : "interactive" }];
+      }
       page.attempts += 1;
-      // "forever" keeps throwing on every attempt; "once" throws only on the first.
-      if (page.boom || page.attempts === 1) {
+      // Reading into a document that is still loading is what threw live. So the evaluate fails
+      // until the document has settled: a caller that retries on a fixed delay, without waiting
+      // for readyState, hits this every time and gets nothing.
+      if (page.boom || (page.polls || 0) < 3) {
         throw new Error("Execution context was destroyed.");
       }
       return [{ result: globalThis.dictatorExtract({}) }];
@@ -1105,7 +1114,8 @@ globalThis.fetch = async (url, init) => {
 };
 const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
 const result = await client.sendPage("page");
-console.log(JSON.stringify({ result, attempts: page.attempts, sent: sent.length }));
+console.log(JSON.stringify({ result, attempts: page.attempts, polls: page.polls || 0,
+                              sent: sent.length, text: sent[0] ? sent[0].text : "" }));
 """
 
 
@@ -1121,12 +1131,13 @@ def _navigate(tmp_path: Path, mode: str) -> dict:
 def test_a_page_that_navigates_mid_read_is_read_on_one_retry(tmp_path):
     """Regression, live 2026-10-20: outlook.live.com/mail/ threw "Execution context was destroyed".
 
-    That is the page replacing its own document, not a page we cannot read, so one retry is made
-    after the navigation settles and the second read is what gets sent.
+    That is the page replacing its own document, not a page we cannot read, so the client waits for
+    the new document to finish loading, then reads once more and sends that.
     """
     out = _navigate(tmp_path, "once")
     assert out["result"]["ok"] is True, out["result"]
     assert out["attempts"] == 2, out["attempts"]
+    assert "Inbox: three messages" in out["text"], out["text"][:80]
     assert out["sent"] == 1
 
 
@@ -1138,3 +1149,23 @@ def test_a_page_that_keeps_navigating_is_reported_as_a_redirect_not_retried_fore
     assert out["attempts"] == 2, out["attempts"]
     assert out["sent"] == 0
 
+
+
+def test_reddits_network_security_block_is_refused_too(tmp_path):
+    """The same URL served a different wall to this network on 2026-10-20.
+
+    While the "Prove your humanity" page was being probed, reddit.com/r/python/comments/1/ answered
+    143 characters of "You've been blocked by network security." with no paragraphs at all, which
+    the old code read as page text. Both walls are refused now.
+    """
+    result = extract({
+        "url": "https://www.reddit.com/r/python/comments/1/", "host": "www.reddit.com",
+        "body": {"children": [
+            {"tag": "div", "text": "You've been blocked by network security."},
+            {"tag": "div", "text": "If you think you've been blocked by mistake, file a ticket "
+                                   "below and we'll look into it."},
+            {"tag": "a", "text": "File a ticket"},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "wall", result["text"][:120]
+    assert result["text"] == ""
