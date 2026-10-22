@@ -31,3 +31,20 @@ components, which keep their own licences:
   the certifi files keep MPL terms, and the app does not modify them.
 - tld 0.13.2 (MPL-1.1 OR GPL-2.0-only OR LGPL-2.1-or-later). The app takes the
   MPL-1.1 option. It is pulled in by courlan; the app does not modify it.
+
+- faster-whisper 1.2.1 (MIT) and CTranslate2 4.8.3 (MIT): local speech-to-text.
+- PyAV 19.0.1 (`av`), a faster-whisper dependency: LGPL-3.0, used unmodified as
+  a published wheel with its FFmpeg libraries bundled. It is not linked into
+  this project's code; it is imported at runtime by faster-whisper.
+- tokenizers 0.23.3 (Apache-2.0) and huggingface-hub 2.2.0 (Apache-2.0), both
+  dependencies of faster-whisper; huggingface-hub is only used for downloads,
+  and this project loads a model from a local path.
+- Speech model weights: faster-whisper small.en (MIT for the whisper.cpp /
+  OpenAI Whisper release these were converted from), loaded from a local file
+  path under `models/`, never downloaded at runtime.
+- OpenWhispr (MIT, https://github.com/OpenWhispr/openwhispr): the design of
+  dictation — a hotkey, capture, transcribe, then paste into the focused field —
+  was read from its documentation and rebuilt here in ~230 lines of Python with
+  a different engine and no borrowed source text. No OpenWhispr file is copied;
+  its MIT licence applies if any of its code is ever taken in, and this notice
+  is where that would be recorded.

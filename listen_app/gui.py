@@ -48,6 +48,8 @@ class ListenApp(ctk.CTk):
         self._notes = None  # the Notes window, created on first use
         self._bridge = None  # the loopback listener the browser extension posts to
         self._bridge_error = ""
+        self._dictation = None  # the mic session, created on first use
+        self._paste = True  # paste a dictation into the focused field; the app never pastes on its own
 
         self._build()
         threading.Thread(target=self._load_engine, args=(engine_factory,), daemon=True).start()
@@ -134,6 +136,10 @@ class ListenApp(ctk.CTk):
         self.stop_button = ctk.CTkButton(controls, text="Stop", width=84, image=theme.icon("stop", size=13),
                                          command=self._on_stop, state="disabled", **theme.button("secondary"))
         self.stop_button.grid(row=0, column=4, padx=8, pady=8)
+        self.dictate_button = ctk.CTkButton(
+            controls, text="Dictate", width=96, image=theme.icon("mic", size=14),
+            command=self._on_dictate, **theme.button("secondary"))
+        self.dictate_button.grid(row=0, column=5, padx=(8, 0), pady=8)
 
         self.status = ctk.CTkLabel(self, text="Loading voice engine...", anchor="w", text_color=theme.TEXT_DIM,
                                    font=theme.font(theme.SIZE_SUB))
@@ -144,6 +150,10 @@ class ListenApp(ctk.CTk):
         self.progress.set(0)
         self.progress.grid(row=5, column=0, padx=16, pady=(6, 16), sticky="ew")
         self._set_buttons(read=False, stop=False)  # nothing is live until the engine is ready
+        # Cmd/Ctrl+Shift+D anywhere in the window toggles dictation, so it is reachable from the
+        # keyboard without the window having focus stolen by a global shortcut.
+        self.bind_all("<Command-Shift-d>", lambda _event: self._on_dictate())
+        self.bind_all("<Control-Shift-d>", lambda _event: self._on_dictate())
 
     # ----- engine -------------------------------------------------------
     def _load_engine(self, factory: Callable[[], object]) -> None:
@@ -162,7 +172,8 @@ class ListenApp(ctk.CTk):
         """
         from listen_app.bridge import Bridge
 
-        bridge = Bridge(lambda payload: self._events.put(("bridged", payload)))
+        bridge = Bridge(lambda payload: self._events.put(("bridged", payload)),
+                        on_dictate=self._dictate_toggle)
         if not bridge.start():
             self._bridge_error = bridge.error
             self.status.configure(text=f"Browser bridge off: {bridge.error}")
@@ -208,6 +219,10 @@ class ListenApp(ctk.CTk):
             self._finish(payload)
         elif kind == "bridged":
             self._on_bridged(payload)
+        elif kind == "dictated":
+            self._on_dictated(str(payload))
+        elif kind == "dictation_state":
+            self._set_dictating(bool(payload))
         elif kind == "done":
             self._busy = False
             self.progress.set(0)
@@ -349,6 +364,78 @@ class ListenApp(ctk.CTk):
             self.status.configure(text="Type or paste text in the box first")
         else:
             self.status.configure(text="Text ready")
+
+    # ----- dictation -----------------------------------------------------------
+    def _session(self):
+        """The mic session, built on first use. Its callbacks only queue events, never touch Tk."""
+        if self._dictation is None:
+            from listen_app.dictate import Session
+
+            self._dictation = Session(
+                on_text=lambda text: self._events.put(("dictated", text)),
+                on_status=lambda message: self._events.put(("status", message)),
+            )
+        return self._dictation
+
+    def _dictate_toggle(self) -> bool:
+        """Start or stop listening. Safe to call from a request thread: only the queue is touched.
+
+        The state event is what keeps the button honest when the extension's hotkey — not the
+        button — started the microphone. Measured without it: the bridge answered recording: true
+        while the button still read Dictate.
+        """
+        session = self._session()
+        if session.recording:
+            session.stop()
+            self._events.put(("dictation_state", False))
+            return False
+        try:
+            session.start()
+        except Exception as exc:  # reported in the window, never raised into the bridge thread
+            self._events.put(("status", str(exc)))
+            self._events.put(("dictation_state", False))
+            return False
+        self._events.put(("dictation_state", True))
+        return True
+
+    def _on_dictate(self) -> None:
+        """The Dictate button: listen, then put what was said where the cursor already is.
+
+        Recording is stopped from the same button (it reads Stop while listening). The mic itself
+        runs off the Tk thread, and the transcript arrives back through the event queue.
+        """
+        if self._busy:
+            self.status.configure(text="Stop the reading first, then dictate.")
+            return
+        self._dictate_toggle()  # the relabel and the "Listening" line arrive as a state event
+
+    def _set_dictating(self, recording: bool) -> None:
+        self.dictate_button.configure(
+            text="Stop" if recording else "Dictate",
+            image=theme.icon("stop" if recording else "mic", size=14),
+        )
+        if recording:
+            self.status.configure(text="Listening. Press Stop when you are done.")
+
+    def _on_dictated(self, text: str) -> None:
+        """A transcript came back: show it in the box, then paste it at the cursor if asked to."""
+        self._set_dictating(False)
+        if not text:
+            return
+        self._set_text(text)
+        self._loaded_source = ""  # it is speech, not a page: nothing to attribute
+        if not self._paste:
+            self.status.configure(text="Dictated into the box.")
+            return
+        from listen_app.paste import PasteError, paste_text
+
+        try:
+            paste_text(text)
+        except PasteError as exc:
+            # The text is in the box either way, so this is a partial success and says so.
+            self.status.configure(text=f"Dictated into the box; could not paste at the cursor: {exc}")
+            return
+        self.status.configure(text="Dictated and pasted at the cursor.")
 
     def _on_summarize(self) -> None:
         """Summarise the loaded text into key points, then let the user add them to a note.

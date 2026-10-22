@@ -274,3 +274,62 @@ def test_concurrent_posts_are_all_delivered_once():
         live.stop()
     assert statuses == [200] * 24
     assert sorted(p["text"] for p in received) == sorted(f"note {i}" for i in range(24))
+
+
+# ----- the dictation toggle the extension's hotkey uses ---------------------
+def _dictate_bridge(state: dict, token="a" * 48):
+    def toggle() -> bool:
+        state["recording"] = not state.get("recording", False)
+        return state["recording"]
+
+    port = _free_port()
+    live = bridge.Bridge(lambda _payload: None, token=token, port=port, on_dictate=toggle)
+    assert live.start(), live.error
+    return live, port
+
+
+def test_dictate_toggles_and_carries_no_audio():
+    """The mic stays in the app. The extension can ask start/stop and nothing else."""
+    state: dict = {}
+    live, port = _dictate_bridge(state)
+    try:
+        status, body, _ = post(port, {}, path="/dictate")
+        assert status == 200 and body == {"ok": True, "recording": True}
+        status, body, _ = post(port, {}, path="/dictate")
+        assert status == 200 and body == {"ok": True, "recording": False}
+        assert "audio" not in body and "text" not in body
+    finally:
+        live.stop()
+
+
+def test_dictate_needs_the_pairing_code():
+    state: dict = {}
+    live, port = _dictate_bridge(state)
+    try:
+        status, body, _ = post(port, {}, path="/dictate", token="b" * 48)
+        assert status == 401 and body["ok"] is False
+        assert state == {}, "an unpaired caller must not reach the microphone"
+    finally:
+        live.stop()
+
+
+def test_dictate_is_refused_when_the_window_did_not_wire_it():
+    port = _free_port()
+    live = bridge.Bridge(lambda _payload: None, token="a" * 48, port=port)  # no on_dictate
+    assert live.start(), live.error
+    try:
+        status, body, _ = post(port, {}, path="/dictate")
+        assert status == 503 and "dictation" in body["error"]
+    finally:
+        live.stop()
+
+
+def test_a_large_dictate_body_is_drained_not_parsed():
+    """The body is ignored, so an odd or large one costs nothing and cannot be a payload hole."""
+    state: dict = {}
+    live, port = _dictate_bridge(state)
+    try:
+        status, body, _ = post(port, {"kind": "text", "text": "x" * 5000}, path="/dictate")
+        assert status == 200 and body["ok"] is True
+    finally:
+        live.stop()

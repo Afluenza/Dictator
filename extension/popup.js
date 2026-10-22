@@ -1,7 +1,7 @@
 /* The popup: pair once, then send. Every message shown here comes from a real reply or a real
  * failure — nothing reports success it did not get. */
 
-import { getToken, probe, sendLink, sendPage, setToken } from "./client.js";
+import { dictate, getToken, probe, sendLink, sendPage, setToken } from "./client.js";
 
 const ui = {
   dot: document.getElementById("dot"),
@@ -11,6 +11,7 @@ const ui = {
   save: document.getElementById("save"),
   sendText: document.getElementById("send-text"),
   sendLink: document.getElementById("send-link"),
+  dictate: document.getElementById("dictate"),
   status: document.getElementById("status"),
 };
 
@@ -39,7 +40,7 @@ async function refresh() {
 }
 
 async function send(handler) {
-  for (const button of [ui.sendText, ui.sendLink]) button.disabled = true;
+  for (const button of [ui.sendText, ui.sendLink, ui.dictate]) button.disabled = true;
   say("Sending...");
   try {
     const result = await handler();
@@ -47,7 +48,7 @@ async function send(handler) {
   } catch (error) {
     say(`Failed: ${error.message}`, "bad");
   } finally {
-    for (const button of [ui.sendText, ui.sendLink]) button.disabled = false;
+    for (const button of [ui.sendText, ui.sendLink, ui.dictate]) button.disabled = false;
   }
 }
 
@@ -67,5 +68,12 @@ ui.code.addEventListener("keydown", (event) => {
 
 ui.sendText.addEventListener("click", () => send(() => sendPage("page")));
 ui.sendLink.addEventListener("click", () => send(sendLink));
+ui.dictate.addEventListener("click", async () => {
+  // Same call as the hotkey. The popup closes on the second press, so the badge is the state.
+  const result = await dictate();
+  say(result.message, result.ok ? "ok" : "bad");
+  ui.dictate.textContent = result.ok && result.recording ? "Stop dictating (Alt+Shift+D)"
+                                                         : "Dictate (Alt+Shift+D)";
+});
 
 refresh();
