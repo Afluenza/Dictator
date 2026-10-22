@@ -31,8 +31,11 @@ from listen_app.social_read import is_web_link
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-MAX_BODY = 200_000  # a payload, not a file: the 60k text cap plus its URL and title
-MAX_TEXT = 60_000  # matches social_read.MAX_CHARS, so a bridged page is no larger than a fetched one
+MAX_TEXT = 60_000  # characters; matches social_read.MAX_CHARS, so a bridged page is no larger than a fetched one
+# Bytes, not characters: JSON may escape each character up to 12 bytes (\uXXXX per UTF-16 unit, two
+# units for a surrogate pair), so 60,000 emoji arrive as ~720 KB. The cap must cover the worst case.
+MAX_BODY = MAX_TEXT * 12 + 16_384  # worst-case escaped text plus URL, title and JSON framing
+DICTATE_MAX_BODY = 65_536  # /dictate carries nothing and the body is drained, not parsed; this only bounds the drain
 MAX_URL = 2_048
 TOKEN_HEADER = "X-Dictator-Token"
 TOKEN_BYTES = 24  # 48 hex characters
@@ -259,6 +262,9 @@ def make_handler(token: str, on_payload: Callable[[dict], None],
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 self._send(400, {"ok": False, "error": "bad Content-Length"})
+                return
+            if length > DICTATE_MAX_BODY:
+                self._send(413, {"ok": False, "error": f"body must be at most {DICTATE_MAX_BODY} bytes"})
                 return
             if length > 0:
                 self.rfile.read(length)  # drained so the client's write completes; the body means nothing
