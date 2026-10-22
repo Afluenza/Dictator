@@ -66,7 +66,12 @@ function dictatorExtract(options) {
       host: "reddit.com",
       // old.reddit is kept as a fallback: the redesign serves <shreddit-post>, and a logged-out
       // or legacy view can still serve the old markup.
-      post: ['shreddit-post [slot="text-body"]', '[data-testid="post-content"]', ".usertext-body"],
+      // A link or image post has no [slot="text-body"] — only a title — so the title is the post
+      // and the replies below it are still the conversation. Without these selectors the whole
+      // thread read came back empty, the generic scan took over, and the note began with the
+      // sidebar's community rules with the replies mixed in as page text (measured 2026-10-21).
+      post: ['shreddit-post [slot="text-body"]', 'shreddit-post [slot="title"]',
+        "shreddit-post h1", '[data-testid="post-content"]', ".usertext-body"],
       comments: ['shreddit-comment [slot="comment"]', ".comment .usertext-body"],
     },
     {
@@ -323,7 +328,12 @@ function dictatorExtract(options) {
     if (!post && hostMatches(host, "youtube.com")) {
       post = fromSelector("ytm-crawler-description, ytm-expandable-video-description-body-renderer");
     }
-    return post ? post + commentsBlock(site) : "";
+    // A post with nothing to read (an image post with no title) still has its conversation, so the
+    // replies are sent under their own heading rather than being dropped with the body. Returning
+    // "" here let the generic scan take the page instead, which is how a sidebar reached a note.
+    const comments = commentsBlock(site);
+    if (!post) return comments.trim();
+    return post + comments;
   }
 
   // YouTube only mounts its comments after they scroll near the viewport: measured live 2026-10-20,
