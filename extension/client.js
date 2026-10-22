@@ -96,6 +96,38 @@ async function waitForReady(tabId, ceilingMs) {
   }
 }
 
+/* Hosts measured to finish loading while still blank, so the body is the only honest signal.
+ * outlook.live.com/mail/, measured 2026-10-21: readyState "complete" with a 0-character body at
+ * 750 ms, still empty at 2.5 s, the Microsoft 365 product page by 6 s. Nothing throws in that
+ * window, so the destroyed-context retry above never fires on it. Only measured hosts are listed:
+ * an ordinary empty page must still answer at once rather than being read twice. */
+const BLANK_PAGE_HOSTS = ["outlook.live.com"];
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/* Poll until the document carries text. True as soon as it does, false if the ceiling passes. */
+async function waitForText(tabId, ceilingMs) {
+  for (let waited = 0; waited <= ceilingMs; waited += 400) {
+    try {
+      const state = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => Boolean(document.body && document.body.innerText.trim()),
+      });
+      if (state && state[0] && state[0].result) return true;
+    } catch {
+      // The document is mid-swap; try again on the next tick.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return false;
+}
+
 /* Inject extract.js, then read the value back. Two injections share one isolated world, so the
  * extraction stays a readable file instead of being copied inline here. */
 async function injectAndExtract(tabId, preferSelection) {
@@ -178,6 +210,34 @@ export async function sendPage(mode = "auto") {
       page = (results && results[0] && results[0].result) || page;
     } catch {
       // The reveal is best effort: if it fails, the description already read is still sent.
+    }
+  }
+  // A page can finish loading while still blank and fill in afterwards without ever throwing, so
+  // the destroyed-context retry above never fires. On the hosts measured to do it, watch the body
+  // and read once more the moment it has text. Bounded, and scoped by host so an ordinary empty
+  // page keeps answering at once instead of waiting six seconds to say nothing.
+  const startedOn = hostOf(tab.url);
+  const wentBlank = !page || !page.text || page.text.trim().length < 2;
+  if (wentBlank && BLANK_PAGE_HOSTS.some((known) => startedOn === known || startedOn.endsWith("." + known))) {
+    if (await waitForText(tab.id, 6000)) {
+      try {
+        results = await injectAndExtract(tab.id, mode === "auto");
+        const later = results && results[0] && results[0].result;
+        if (later) {
+          page = later;
+          // The same "blank then fill" page is usually the site sending you somewhere else — a
+          // mailbox that signs you out lands on its own marketing page. Sending that as mail would
+          // put sales copy in a note, so a change of host is reported instead.
+          if (hostOf(later.url) !== startedOn) {
+            return {
+              ok: false,
+              message: `This page redirected to ${hostOf(later.url)}, so there was nothing to send. Open the page again and send once it has loaded.`,
+            };
+          }
+        }
+      } catch {
+        // The re-read is best effort: the message below still tells the truth about what was found.
+      }
     }
   }
   if (!page || !page.text || page.text.trim().length < 2) {

@@ -515,6 +515,55 @@ def test_a_reddit_thread_stops_at_the_comment_cap(tmp_path):
     assert len(result["text"]) < 60000
 
 
+def test_a_reddit_link_post_keeps_the_conversation_and_not_the_sidebar(tmp_path):
+    """A link post has a title and no body, and the reply under it is still the point.
+
+    Reproduced 2026-10-21: a post with no [slot="text-body"] made the thread read return "", the
+    generic page scan took over, and the note began with the sidebar's community rules with the
+    replies mixed in as page text. The title carries the post now, so the conversation is read,
+    labelled, and the sidebar is not.
+    """
+    result = extract({
+        "url": "https://www.reddit.com/r/Python/comments/x/link/", "host": "www.reddit.com",
+        "body": {"children": [
+            {"tag": "aside", "children": [
+                para(f"Related community rule {i}: keep posts on topic and civil.") for i in range(8)]},
+            {"tag": "shreddit-post", "children": [
+                {"tag": "h1", "attrs": {"slot": "title"},
+                 "text": "What are some good python projects for a beginner?"}]},
+            {"tag": "shreddit-comment", "children": [
+                {"tag": "div", "attrs": {"slot": "comment"}, "text": "Try a web scraper with httpx."}]},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "post", result["text"][:160]
+    assert result["text"].startswith("What are some good python projects")
+    assert "Comments:" in result["text"] and "web scraper" in result["text"]
+    assert "Related community rule" not in result["text"]
+
+
+def test_a_reddit_post_that_reads_empty_still_sends_its_comments(tmp_path):
+    """An image post is a title, a picture and a conversation.
+
+    When the post selector finds nothing, the replies must still arrive under their heading
+    instead of being dropped along with the post body.
+    """
+    result = extract({
+        "url": "https://www.reddit.com/r/x/comments/y/img/", "host": "www.reddit.com",
+        "body": {"children": [
+            {"tag": "shreddit-post", "children": [{"tag": "img"}]},
+            {"tag": "shreddit-comment", "children": [
+                {"tag": "div", "attrs": {"slot": "comment"},
+                 "text": "That is a capacitor bank, not a battery pack."}]},
+            {"tag": "shreddit-comment", "children": [
+                {"tag": "div", "attrs": {"slot": "comment"},
+                 "text": "The label says 400V, so do not touch the terminals."}]},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "post", result["text"][:160]
+    assert result["text"].startswith("Comments:")
+    assert "capacitor bank" in result["text"] and "400V" in result["text"]
+
+
 def test_a_youtube_video_reads_the_full_description_not_the_collapsed_box(tmp_path):
     """YouTube collapses the description to ~370 characters behind a "more" button.
 
@@ -1189,6 +1238,120 @@ def test_a_page_that_keeps_navigating_is_reported_as_a_redirect_not_retried_fore
     assert out["attempts"] == 2, out["attempts"]
     assert out["sent"] == 0
 
+
+
+BLANK_PAGE = r"""
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const mode = process.argv[3];   // "inbox", "redirect" or "other"
+const extractSrc = readFileSync(`${dir}/extract.js`, "utf8");
+
+// Measured live 2026-10-21 on outlook.live.com/mail/: "complete" with an empty body at 750 ms,
+// still empty at 2.5 s, the Microsoft 365 product page by 6 s. The page replaces itself with no
+// thrown error, which is why the destroyed-context retry never fires on it.
+const START = mode === "other" ? "https://example.com/report" : "https://outlook.live.com/mail/";
+const AFTER = mode === "redirect"
+  ? "https://www.microsoft.com/en-us/microsoft-365/outlook/email-and-calendar-software-microsoft-outlook"
+  : START;
+const FILL = mode === "redirect"
+  ? "Microsoft 365 brings together your favourite apps in one place. ".repeat(8)
+  : "Inbox: three messages, one from Sam about the deployment window. ".repeat(8);
+
+const page = { filled: false, polls: 0, extracts: 0, url: START };
+function mountDocument() {
+  globalThis.document = {
+    title: "Mail",
+    body: { innerText: page.filled ? FILL : "", textContent: page.filled ? FILL : "" },
+    activeElement: null,
+    documentElement: { scrollHeight: 900 },
+    querySelectorAll: () => [],
+  };
+}
+mountDocument();
+globalThis.location = { href: START, hostname: new URL(START).hostname };
+globalThis.window = {
+  getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  getSelection: () => ({ rangeCount: 0, isCollapsed: true, toString: () => "" }),
+  scrollY: 0, scrollTo: () => {},
+};
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 11, url: START }] },
+  scripting: {
+    executeScript: async ({ files, func }) => {
+      if (files) {
+        globalThis.dictatorExtract = new Function(`${extractSrc}; return dictatorExtract;`)();
+        mountDocument();
+        return [{ result: null }];
+      }
+      const body = String(func);
+      // Complete the whole time it is blank: nothing throws, so a caller that only retries on a
+      // thrown error never reaches a second read.
+      if (body.includes("readyState")) return [{ result: "complete" }];
+      if (body.includes("innerText")) {
+        page.polls += 1;
+        if (page.polls >= 2) { page.filled = true; page.url = AFTER; mountDocument(); }
+        return [{ result: page.filled }];
+      }
+      page.extracts += 1;
+      globalThis.location = { href: page.url, hostname: new URL(page.url).hostname };
+      mountDocument();
+      return [{ result: globalThis.dictatorExtract({}) }];
+    },
+  },
+};
+const sent = [];
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
+  return { ok: true, status: 200, json: async () => ({ ok: true, chars: 40 }) };
+};
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+const result = await client.sendPage("page");
+console.log(JSON.stringify({ result, extracts: page.extracts, polls: page.polls, sent: sent.length,
+                             text: sent[0] ? sent[0].text : "" }));
+"""
+
+
+def _blank_page(tmp_path: Path, mode: str) -> dict:
+    script = tmp_path / "blank.mjs"
+    script.write_text(BLANK_PAGE, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT), mode], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    return json.loads(run.stdout)
+
+
+def test_a_mailbox_page_that_reports_complete_while_blank_is_read_once_it_has_text(tmp_path):
+    """Regression, measured live 2026-10-21: outlook.live.com/mail/ reported readyState
+    "complete" with a 0-character body from 750 ms to 2.5 s. Nothing threw, so the
+    destroyed-context retry never fired and the reader was told "Found no text on the page".
+    The client now watches the body rather than readyState, and reads once more.
+    """
+    out = _blank_page(tmp_path, "inbox")
+    assert out["result"]["ok"] is True, out["result"]
+    assert "Inbox: three messages" in out["text"]
+    assert out["extracts"] == 2, out["extracts"]
+    assert out["sent"] == 1
+
+
+def test_a_mailbox_that_redirects_to_the_product_page_is_named_not_sent(tmp_path):
+    """After the blank window the same page becomes Microsoft 365's sales page. Sending that as
+    mail would put marketing copy in a note, so it is reported instead of sent."""
+    out = _blank_page(tmp_path, "redirect")
+    assert out["result"]["ok"] is False, out["result"]
+    assert "redirected" in out["result"]["message"].lower(), out["result"]["message"]
+    assert out["sent"] == 0
+
+
+def test_an_empty_page_on_any_other_host_is_not_read_twice(tmp_path):
+    """The re-read is scoped to the hosts measured to go blank, so an ordinary empty page still
+    says so immediately: one read, no polling, the same message as before."""
+    out = _blank_page(tmp_path, "other")
+    assert out["result"]["ok"] is False
+    assert out["result"]["message"].startswith("Found no text on the page"), out["result"]
+    assert out["extracts"] == 1, out["extracts"]
+    assert out["polls"] == 0, out["polls"]
 
 
 def test_reddits_network_security_block_is_refused_too(tmp_path):
