@@ -109,7 +109,12 @@ function dictatorExtract(options) {
   // Hosts that show a sign-in wall to a logged-out reader instead of the post. Their wall page is
   // a short marketing/login page, which the generic paths would send as if it were the article.
   const LOGIN_HOSTS = ["facebook.com", "instagram.com", "discord.com", "x.com", "twitter.com",
-    "linkedin.com", "threads.net"];
+    "linkedin.com", "threads.net",
+    // A logged-out Gmail tab does not stay on mail.google.com: measured live 2026-10-20 it lands on
+    // accounts.google.com/v3/signin/identifier with a 128-character sign-in card ("Sign in to
+    // continue to Gmail / Email or phone / Next"), which the generic paths sent as page text. Both
+    // hosts are listed because only the final one is what the content script ever sees.
+    "accounts.google.com", "mail.google.com"];
   const LOGIN_WALL_MAX_CHARS = 1500;
   // A signed-in page always carries its own content container. Requiring that container to be
   // absent is what keeps a short real post from being refused for merely quoting "sign in".
@@ -121,6 +126,12 @@ function dictatorExtract(options) {
     ["twitter.com", '[data-testid="tweetText"]'],
     ["linkedin.com", ".feed-shared-update-v2__description, .attributed-text-segment-list__content"],
     ["threads.net", 'div[dir="auto"] span'],
+    // Deliberately no Google entry. On every other host here the signed-in container is known and
+    // measured, so it can be required positively; the signed-in Gmail DOM was NOT measured (no
+    // signed-in session in this run), so asserting a container I have not seen could refuse a real
+    // mailbox. Google is instead protected by the length ceiling: the sign-in card was 128
+    // characters live, and a real mailbox, with its folder list and message rows, is far over 1500.
+    // A wrong answer here costs one refused press, never a wall sent as the note.
   ];
 
   // A page that no longer exists still answers HTTP 200 on many sites, and a content script never
