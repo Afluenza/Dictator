@@ -333,3 +333,42 @@ def test_a_large_dictate_body_is_drained_not_parsed():
         assert status == 200 and body["ok"] is True
     finally:
         live.stop()
+
+
+# ----- round 26: limits are in bytes, and /dictate refuses an oversized body ----
+def test_the_worst_case_escaped_60k_text_is_accepted(pair):
+    """60,000 emoji is 720 KB once JSON escapes it. The documented 60k-character limit must hold."""
+    live, received, port = pair
+    text = "\U0001F600" * bridge.MAX_TEXT
+    body = json.dumps({"kind": "text", "text": text}).encode()
+    assert len(body) > 200_000  # the old byte cap refused this with 413
+    status, reply, _ = post(port, None, raw=body)
+    assert status == 200, reply
+    assert len(received) == 1 and len(received[0]["text"]) == bridge.MAX_TEXT
+
+
+def test_text_over_the_character_limit_is_still_refused(pair):
+    live, received, port = pair
+    status, body, _ = post(port, {"kind": "text", "text": "x" * (bridge.MAX_TEXT + 1)})
+    assert status == 400 and "longer than" in body["error"]
+    assert received == []
+
+
+def test_dictate_refuses_an_oversized_body_without_reading_it():
+    """A huge Content-Length must get a 413 straight away, not a hang while the server waits for bytes."""
+    state: dict = {}
+    live, port = _dictate_bridge(state)
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/dictate", data=b"", method="POST",
+            headers={bridge.TOKEN_HEADER: "a" * 48, "Content-Length": str(10_000_000)},
+        )
+        try:
+            urllib.request.urlopen(request, timeout=3)
+            status = 200
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        assert status == 413
+        assert state == {}, "an oversized /dictate must not toggle the microphone"
+    finally:
+        live.stop()
