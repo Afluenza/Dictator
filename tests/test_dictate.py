@@ -10,6 +10,8 @@ av LGPL-3.0 (as a wheel-bundled shared library), soundfile BSD-3. All GPL-free.
 """
 
 import importlib.util
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -241,8 +243,6 @@ def test_session_reports_an_engine_failure_instead_of_vanishing():
         raise EngineMissing("no model at /nowhere")
 
     texts: list[str] = []
-    import threading
-
     done = threading.Event()
     session = Session(engine_factory=broken, on_text=texts.append, on_status=statuses.append,
                       recorder_factory=lambda: FakeRecorder())
@@ -332,8 +332,6 @@ def test_the_callers_message_is_the_last_word_in_the_status_line():
     """Measured defect: the session's own "Dictated." was emitted after on_text, so it arrived
     after the window's paste message and overwrote it. A failed paste then looked identical to a
     successful one. The session now stops talking once the transcript is handed over."""
-    import threading
-
     statuses: list[str] = []
     texts: list[str] = []
     done = threading.Event()
@@ -351,3 +349,22 @@ def test_the_callers_message_is_the_last_word_in_the_status_line():
     assert texts == [SPOKEN]
     assert statuses[-1] == "caller's own message", statuses
     assert "Dictated." not in statuses, "the session must not speak over the caller"
+
+
+def test_overlapping_finishes_load_the_engine_once():
+    """Two dictations finishing at once must share one model load, not build two."""
+    built: list[int] = []
+
+    def slow_factory():
+        time.sleep(0.2)
+        built.append(1)
+        return StubEngine(SPOKEN)
+
+    session = Session(engine_factory=slow_factory, on_text=lambda _t: None)
+    audio = np.zeros(dictate.SAMPLE_RATE, dtype=np.float32)
+    threads = [threading.Thread(target=session._finish, args=(audio, None)) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert len(built) == 1, f"the model was loaded {len(built)} times"
