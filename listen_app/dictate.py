@@ -245,16 +245,19 @@ class Session:
         self._engine: STTEngine | None = None
         self._recorder: Recorder | None = None
         self._lock = threading.Lock()
+        self._engine_lock = threading.Lock()
 
     @property
     def recording(self) -> bool:
         return self._recorder is not None and self._recorder.recording
 
     def _get_engine(self) -> STTEngine:
-        if self._engine is None:
-            self._on_status("Loading the transcription model...")
-            self._engine = self._engine_factory()
-        return self._engine
+        # Two dictations can finish at once; without the lock both would load the model (memory, 0.4 s).
+        with self._engine_lock:
+            if self._engine is None:
+                self._on_status("Loading the transcription model...")
+                self._engine = self._engine_factory()
+            return self._engine
 
     def start(self) -> None:
         with self._lock:
