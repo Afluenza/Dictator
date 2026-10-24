@@ -1372,3 +1372,24 @@ def test_reddits_network_security_block_is_refused_too(tmp_path):
     }, tmp_path)
     assert result["how"] == "wall", result["text"][:120]
     assert result["text"] == ""
+
+
+# ----- dictation ------------------------------------------------------------
+def test_the_dictate_command_is_declared_and_sends_no_audio():
+    """Alt+Shift+D asks the app to start/stop its own mic. The extension never records anything,
+    which is why it still asks for no microphone permission."""
+    commands = manifest()["commands"]
+    assert "dictate" in commands, commands
+    assert commands["dictate"]["suggested_key"]["default"] == "Alt+Shift+D"
+    assert "microphone" not in manifest().get("permissions", [])
+    client = (EXT / "client.js").read_text(encoding="utf-8")
+    assert "/dictate" in client
+    background = (EXT / "background.js").read_text(encoding="utf-8")
+    assert "dictate" in background, "the worker must handle the command the manifest declares"
+
+
+def test_every_declared_command_is_handled():
+    """A command in the manifest with no listener is a shortcut that silently does nothing."""
+    background = (EXT / "background.js").read_text(encoding="utf-8")
+    for command in manifest()["commands"]:
+        assert f'"{command}"' in background, f"{command} is declared but never handled"

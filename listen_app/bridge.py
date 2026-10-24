@@ -31,8 +31,11 @@ from listen_app.social_read import is_web_link
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-MAX_BODY = 200_000  # a payload, not a file: the 60k text cap plus its URL and title
-MAX_TEXT = 60_000  # matches social_read.MAX_CHARS, so a bridged page is no larger than a fetched one
+MAX_TEXT = 60_000  # characters; matches social_read.MAX_CHARS, so a bridged page is no larger than a fetched one
+# Bytes, not characters: JSON may escape each character up to 12 bytes (\uXXXX per UTF-16 unit, two
+# units for a surrogate pair), so 60,000 emoji arrive as ~720 KB. The cap must cover the worst case.
+MAX_BODY = MAX_TEXT * 12 + 16_384  # worst-case escaped text plus URL, title and JSON framing
+DICTATE_MAX_BODY = 65_536  # /dictate carries nothing and the body is drained, not parsed; this only bounds the drain
 MAX_URL = 2_048
 TOKEN_HEADER = "X-Dictator-Token"
 TOKEN_BYTES = 24  # 48 hex characters
@@ -138,7 +141,8 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
 
 
-def make_handler(token: str, on_payload: Callable[[dict], None]):
+def make_handler(token: str, on_payload: Callable[[dict], None],
+                 on_dictate: Callable[[], bool] | None = None):
     """A request handler bound to one token and one delivery callback."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -209,7 +213,11 @@ def make_handler(token: str, on_payload: Callable[[dict], None]):
         def do_POST(self) -> None:  # noqa: N802
             if not self._allowed():
                 return
-            if self.path.split("?")[0] != "/ingest":
+            path = self.path.split("?")[0]
+            if path == "/dictate":
+                self._dictate()
+                return
+            if path != "/ingest":
                 self._send(404, {"ok": False, "error": "no such endpoint"})
                 return
             if not self._authorised():
@@ -239,6 +247,34 @@ def make_handler(token: str, on_payload: Callable[[dict], None]):
             self._send(200, {"ok": True, "kind": payload["kind"],
                              "chars": len(payload.get("text") or payload.get("url") or "")})
 
+        def _dictate(self) -> None:
+            """Toggle dictation for the extension's hotkey. No audio crosses this socket.
+
+            The microphone stays in the app, so a compromised extension can only ask the app to
+            start or stop listening — it can never hear anything and never sees the transcript.
+            """
+            if not self._authorised():
+                return
+            if on_dictate is None:
+                self._send(503, {"ok": False, "error": "dictation is not wired to this window"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send(400, {"ok": False, "error": "bad Content-Length"})
+                return
+            if length > DICTATE_MAX_BODY:
+                self._send(413, {"ok": False, "error": f"body must be at most {DICTATE_MAX_BODY} bytes"})
+                return
+            if length > 0:
+                self.rfile.read(length)  # drained so the client's write completes; the body means nothing
+            try:
+                state = on_dictate()
+            except Exception as exc:  # a broken receiver is reported, never a stack trace
+                self._send(500, {"ok": False, "error": type(exc).__name__})
+                return
+            self._send(200, {"ok": True, "recording": bool(state)})
+
     return Handler
 
 
@@ -246,10 +282,11 @@ class Bridge:
     """The listening end. `on_payload` runs on a request thread, so it must be thread-safe."""
 
     def __init__(self, on_payload: Callable[[dict], None], token: str | None = None,
-                 port: int = DEFAULT_PORT) -> None:
+                 port: int = DEFAULT_PORT, on_dictate: Callable[[], bool] | None = None) -> None:
         self.token = token or load_token()
         self.port = port
         self._on_payload = on_payload
+        self._on_dictate = on_dictate
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.error = ""
@@ -259,7 +296,7 @@ class Bridge:
         if self._server is not None:
             return True
         try:
-            server = _Server((HOST, self.port), make_handler(self.token, self._on_payload))
+            server = _Server((HOST, self.port), make_handler(self.token, self._on_payload, self._on_dictate))
         except OSError as exc:
             self.error = f"port {self.port} is unavailable: {exc.strerror or exc}"
             return False

@@ -69,6 +69,35 @@ export async function send(payload) {
   return { ok: false, message: body.error || `Listen refused it (${response.status}).` };
 }
 
+/* Ask the app to start or stop dictating. No audio crosses this socket: the microphone stays inside
+ * Listen, which is why the extension never needs a mic permission and never sees the transcript. */
+export async function dictate() {
+  const token = await getToken();
+  if (!token) return { ok: false, message: "Not paired yet. Press Browser in Listen for the code." };
+  let response;
+  try {
+    response = await fetch(`${ENDPOINT}/dictate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", [TOKEN_HEADER]: token },
+      body: "{}",
+    });
+  } catch {
+    return { ok: false, message: "Listen is not running. Open the app and try again." };
+  }
+  const body = await readJson(response);
+  if (response.ok && body.ok) {
+    return {
+      ok: true,
+      recording: Boolean(body.recording),
+      message: body.recording ? "Listening in Listen. Press again to stop." : "Stopped; transcribing.",
+    };
+  }
+  if (response.status === 401) {
+    return { ok: false, message: "That code does not match. Press Browser in Listen for the current one." };
+  }
+  return { ok: false, message: body.error || `Listen refused it (${response.status}).` };
+}
+
 /* Chrome's wording when the document being scripted is replaced mid-call. A page that navigates
  * itself (a mailbox redirecting to sign-in, a dashboard replacing its shell) hits this; a page we
  * genuinely cannot script does not. Matched on the message because the error arrives as a plain
