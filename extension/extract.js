@@ -111,6 +111,26 @@ function dictatorExtract(options) {
     },
   ];
 
+  // Gmail is two pages behind one host, and both put their furniture inside div[role="main"]:
+  // a message view starts with "Print all / In new window / Inbox / Search for all messages with
+  // label Inbox / Remove label Inbox from this conversation", and a message list starts with
+  // "1–50 of 32,321 / Conversations / Primary / Promotions". The generic <main> scan sent all of
+  // that ahead of the mail, so the note opened with folder labels. Measured live 2026-10-24 on a
+  // signed-in mailbox:
+  //   message view — exactly 1 visible div.a3s (class "a3s aiL msg-<id>", 4,563 chars), the subject
+  //   in h2.hP, the sender in .gD, and 0 table[role="grid"] nodes;
+  //   list view — 0 div.a3s nodes and exactly 1 table[role="grid"] holding 50 tr.zA rows, with the
+  //   folder chrome outside the grid, not inside it.
+  // The header lines are kept because they are the only part of the furniture that says what the
+  // mail is; everything else is dropped by reading the container rather than <main>.
+  const MAIL = {
+    host: "mail.google.com",
+    bodies: "div.a3s",
+    subject: "h2.hP",
+    from: ".gD",
+    list: 'table[role="grid"]',
+  };
+
   // Hosts that show a sign-in wall to a logged-out reader instead of the post. Their wall page is
   // a short marketing/login page, which the generic paths would send as if it were the article.
   const LOGIN_HOSTS = ["facebook.com", "instagram.com", "discord.com", "x.com", "twitter.com",
@@ -303,6 +323,29 @@ function dictatorExtract(options) {
       kept.push(comment);
     }
     return kept.length ? "\n\nComments:\n\n" + kept.join("\n\n") : "";
+  }
+
+  // Gmail: the open message, or the message list. Both are read from their own container so the
+  // folder chrome never reaches the note. A thread whose messages are collapsed shows only the one
+  // div.a3s Gmail has mounted, which is the message the reader has open — the honest reading, since
+  // this extractor never clicks anything on the page.
+  function fromMail() {
+    const bodies = [];
+    for (const el of document.querySelectorAll(MAIL.bodies)) {
+      if (!visible(el)) continue;
+      const text = tidy(el.innerText);
+      if (text.length >= 2) bodies.push(text);
+    }
+    if (bodies.length) {
+      // The subject and sender are the two header lines a reader needs to know what this is; they
+      // are read from their own nodes because the surrounding <main> carries the folder chrome too.
+      const subject = fromSelector(MAIL.subject);
+      const from = fromSelector(MAIL.from);
+      const header = [subject, from].filter((line) => line.length >= 2);
+      return header.length ? header.join("\n") + "\n\n" + bodies.join("\n\n") : bodies.join("\n\n");
+    }
+    // The list view: one container holding every row, and none of the chrome inside it.
+    return fromSelector(MAIL.list);
   }
 
   // The post body (or, on Discord, the visible messages), then the top replies.
@@ -524,6 +567,12 @@ function dictatorExtract(options) {
         break;
       }
     }
+  }
+  // Gmail is read from its own containers, never from <main>, because <main> is where Google puts
+  // the folder list. This runs before the generic scan for that reason.
+  if (!text && hostMatches(host, MAIL.host)) {
+    text = fromMail();
+    how = text ? "mail" : "";
   }
   if (!text) {
     text = fromMain();

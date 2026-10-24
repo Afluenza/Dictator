@@ -355,7 +355,7 @@ export async function sendPage(mode = "auto") {
   const trimmed = page.truncated ? " (trimmed to 60,000 characters)" : "";
   const sent = await send({ kind: "text", text: page.text, url: page.url, title: page.title });
   const what = {
-    selection: "the selection", post: "the post", video: "the video",
+    selection: "the selection", post: "the post", video: "the video", mail: "the email",
     main: "the page", page: "the page", shadow: "the page",
   }[page.how] || "the page";
   return sent.ok ? { ok: true, message: `Sent ${what} to Listen${trimmed}.` } : sent;

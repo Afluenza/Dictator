@@ -780,6 +780,94 @@ def test_a_logged_out_gmail_tab_is_refused_not_sent_as_page_text(tmp_path):
         assert result["text"] == "", host
 
 
+def test_a_signed_in_gmail_message_is_read_without_the_folder_chrome(tmp_path):
+    """A Gmail message must arrive as the mail, not as the mailbox furniture in front of it.
+
+    Measured live 2026-10-24 on a signed-in mailbox: a message view has exactly one visible
+    div.a3s (class "a3s aiL msg-<id>", 4,563 characters), the subject in h2.hP, the sender in
+    .gD, and no table[role="grid"]. Both the folder list and the "Print all / In new window /
+    Inbox / Search for all messages with label Inbox" toolbar live inside div[role="main"], so the
+    generic <main> scan sent them ahead of the mail: 4,758 characters, how "main", note opened with
+    "Print all". The message body is read from its own container now.
+    """
+    result = extract({
+        "url": "https://mail.google.com/mail/u/0/#inbox/FMfcgzQhWxfQKjPtxSKhFJqJLvzRkchP",
+        "host": "mail.google.com",
+        "title": "RAG vs Agentic RAG - someone@gmail.com - Gmail",
+        "body": {"children": [
+            {"tag": "div", "text": "Skip to content Using Gmail with screen readers Search Try Gemini"},
+            {"tag": "div", "text": "Compose Labels Inbox 30,463 Starred Snoozed Sent Drafts 18"},
+            {"tag": "div", "attrs": {"role": "main"}, "children": [
+                {"tag": "div", "text": "Print all\nIn new window"},
+                {"tag": "h2", "attrs": {"class": "hP"}, "text": "RAG vs Agentic RAG"},
+                {"tag": "div", "text": "Inbox Search for all messages with label Inbox"},
+                {"tag": "span", "attrs": {"class": "gD"}, "text": "ByteByteGo"},
+                {"tag": "div", "attrs": {"class": "a3s aiL msg-5230818929322642783"},
+                 "text": "ChatGPT can now react to your product's events.\n\n"
+                         "ChatGPT can now subscribe to events from your MCP server."},
+            ]},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "mail", result["text"][:200]
+    # the mail itself, and the two header lines that say what it is
+    assert "MCP server" in result["text"]
+    assert "RAG vs Agentic RAG" in result["text"]
+    assert "ByteByteGo" in result["text"]
+    # and none of the furniture that used to open the note
+    for furniture in ["Print all", "In new window", "Search for all messages",
+                      "Compose", "Starred", "Snoozed", "Try Gemini", "Skip to content"]:
+        assert furniture not in result["text"], furniture
+    # the subject comes before the body, so a note built from it opens with what the mail is
+    assert result["text"].index("RAG vs Agentic RAG") < result["text"].index("MCP server")
+
+
+def test_a_signed_in_gmail_message_list_is_read_without_the_folder_chrome(tmp_path):
+    """The other Gmail page behind the same host: the list, with no message open.
+
+    Measured live 2026-10-24: the list view has 0 div.a3s nodes and one table[role="grid"] holding
+    50 tr.zA rows, and the folder chrome is outside that grid. The generic scan read <main>, which
+    put "1–50 of 32,321 / Conversations / Primary / Promotions" at the top of the note.
+    """
+    rows = [{"tag": "tr", "attrs": {"class": "zA zE"},
+             "text": f"Sender {i}\nSubject line {i}\n- The first line of message {i}"}
+            for i in range(6)]
+    result = extract({
+        "url": "https://mail.google.com/mail/u/0/#inbox", "host": "mail.google.com",
+        "body": {"children": [
+            {"tag": "div", "text": "Compose Labels Inbox 30,463 Starred Snoozed Sent Drafts"},
+            {"tag": "div", "attrs": {"role": "main"}, "children": [
+                {"tag": "div", "text": "1–50 of 32,321 Conversations"},
+                {"tag": "table", "attrs": {"role": "grid"}, "children": rows},
+            ]},
+        ]},
+    }, tmp_path)
+    assert result["how"] == "mail", result["text"][:200]
+    assert "Subject line 0" in result["text"]
+    for furniture in ["1–50 of 32,321", "Conversations", "Compose", "Starred"]:
+        assert furniture not in result["text"], furniture
+
+
+def test_a_gmail_message_that_is_still_loading_falls_back_instead_of_sending_nothing(tmp_path):
+    """An empty Gmail shell must not become a "mail" answer with no text in it.
+
+    The mail reader runs before the generic scan, so a mailbox page whose containers have not
+    mounted yet has to fall through to the rest of the ladder rather than returning "".
+    """
+    result = extract({
+        "url": "https://mail.google.com/mail/u/0/#inbox", "host": "mail.google.com",
+        "body": {"children": [
+            {"tag": "div", "attrs": {"role": "main"}, "children": [
+                para("The mailbox is still loading, and this sentence stands in for whatever the "
+                     "page will show once it has mounted its own containers. " * 3)]},
+        ]},
+    }, tmp_path)
+    # "main", not "mail": the mail reader found no container, so the ladder carried on. Any answer
+    # with real text is fine here; the failure this guards against is how "mail" with empty text.
+    assert result["how"] != "mail", result["how"]
+    assert result["text"].strip()
+    assert "still loading" in result["text"]
+
+
 def test_a_real_gmail_mailbox_is_not_refused_as_a_sign_in_wall(tmp_path):
     """The 1500-character wall ceiling must keep a signed-in mailbox out of the refusal.
 
@@ -1111,6 +1199,104 @@ def test_a_mobile_page_that_already_has_comments_asks_for_nothing(tmp_path):
     }, tmp_path)
     assert result["revealComments"] is False
     assert "A mobile comment the reader had already opened." in result["text"]
+
+
+GMAIL_SEND = r"""
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const extractSrc = readFileSync(`${dir}/extract.js`, "utf8");
+
+// The measured message view, 2026-10-24: one div.a3s, subject in h2.hP, sender in .gD, and the
+// folder chrome inside div[role="main"] alongside them. The real extract.js runs against it.
+function el(spec) {
+  const node = {
+    tag: spec.tag || "div", attrs: spec.attrs || {}, text: spec.text || "",
+    children: (spec.children || []).map(el),
+    innerText: spec.text || "",
+    getBoundingClientRect: () => ({ width: 500, height: 200 }),
+  };
+  if (node.children.length) node.innerText = node.children.map((c) => c.innerText).join("\n");
+  return node;
+}
+const tree = el({"children": [
+  {"tag": "div", "text": "Compose Labels Inbox 30,463 Starred Snoozed Sent Drafts"},
+  {"attrs": {"role": "main"}, "children": [
+    {"text": "Print all\nIn new window"},
+    {"tag": "h2", "attrs": {"class": "hP"}, "text": "RAG vs Agentic RAG"},
+    {"text": "Inbox Search for all messages with label Inbox"},
+    {"tag": "span", "attrs": {"class": "gD"}, "text": "ByteByteGo"},
+    {"attrs": {"class": "a3s aiL msg-1"}, "text": "The whole point of the message."},
+  ]},
+]});
+const all = [];
+(function walk(n) { for (const c of n.children) { all.push(c); walk(c); } })(tree);
+function matches(node, sel) {
+  return sel.split(",").map((s) => s.trim()).some((s) => {
+    const body = s.replace(/([#.\[])/g, " $1").trim();
+    const bits = s.match(/([a-z0-9]+)|\.([\w-]+)|#([\w-]+)|\[([\w-]+)(?:=["']?([^"'\]]*)["']?)?\]/gi) || [];
+    let ok = true; let sawTag = false;
+    for (const bit of bits) {
+      if (bit.startsWith(".")) { if (!String(node.attrs.class || "").split(/\s+/).includes(bit.slice(1))) ok = false; }
+      else if (bit.startsWith("#")) { if (node.attrs.id !== bit.slice(1)) ok = false; }
+      else if (bit.startsWith("[")) { const m = bit.match(/^\[([\w-]+)(?:=["']?([^"'\]]*)["']?)?\]$/);
+        if (!m || node.attrs[m[1]] === undefined) ok = false; else if (m[2] && node.attrs[m[1]] !== m[2]) ok = false; }
+      else if (!sawTag && bit.toLowerCase() === node.tag.toLowerCase()) { sawTag = true; }
+      else if (sawTag === false && /^[a-z0-9]+$/i.test(bit) && bit.toLowerCase() !== node.tag.toLowerCase()) ok = false;
+    }
+    return ok;
+  });
+}
+globalThis.location = { href: "https://mail.google.com/mail/u/0/#inbox/FMfc", hostname: "mail.google.com" };
+globalThis.document = {
+  title: "RAG vs Agentic RAG - someone@gmail.com - Gmail",
+  body: tree, activeElement: null,
+  querySelectorAll: (sel) => all.filter((n) => matches(n, sel)),
+};
+globalThis.window = {
+  getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  getSelection: () => ({ rangeCount: 0, isCollapsed: true, toString: () => "" }),
+};
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 21, url: "https://mail.google.com/mail/u/0/#inbox/FMfc" }] },
+  scripting: {
+    executeScript: async ({ files }) => {
+      if (files) {
+        globalThis.dictatorExtract = new Function(`${extractSrc}; return dictatorExtract;`)();
+        return [{ result: null }];
+      }
+      return [{ result: globalThis.dictatorExtract({}) }];
+    },
+  },
+};
+const sent = [];
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
+  return { ok: true, status: 200, json: async () => ({ ok: true, chars: 40 }) };
+};
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+const result = await client.sendPage("page");
+console.log(JSON.stringify({ result, text: sent[0] ? sent[0].text : "" }));
+"""
+
+
+def test_the_popup_calls_a_gmail_message_an_email_not_the_post(tmp_path):
+    """The one place "how" reaches the user is the popup's own wording.
+
+    A mail read that reported "Sent the post to Listen." would be describing an email as a social
+    post. This runs the shipped client.js and extract.js against the measured message view.
+    """
+    script = tmp_path / "gmail.mjs"
+    script.write_text(GMAIL_SEND, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT)], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    out = json.loads(run.stdout)
+    assert out["result"]["ok"] is True, out["result"]
+    assert out["result"]["message"] == "Sent the email to Listen.", out["result"]["message"]
+    assert "The whole point of the message." in out["text"]
+    assert "Print all" not in out["text"]
 
 
 MOBILE_TAP = r"""
