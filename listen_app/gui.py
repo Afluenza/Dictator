@@ -17,17 +17,32 @@ from __future__ import annotations
 
 import queue
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 import customtkinter as ctk
 
-from listen_app.extract import ExtractError, UnsupportedInput, extract_file, validate_url
+from listen_app.extract import (SUPPORTED_SUFFIXES, ExtractError, UnsupportedInput, extract_file,
+                                validate_url)
 from listen_app.playback import RenderAhead, play_buffered
 from listen_app import theme
 from listen_app.tts import MAX_SPEED, MIN_SPEED, clamp_speed
 
 POLL_MS = 100
+
+
+@dataclass(frozen=True)
+class _LoadResult:
+    """One extractor's outcome, carrying the ticket of the load that asked for it.
+
+    `seq` is 0 for a result constructed by hand (the tests do this), which is always applied.
+    """
+
+    seq: int
+    text: str = ""
+    status: str = ""
+    error: str = ""
 
 
 class ListenApp(ctk.CTk):
@@ -38,7 +53,7 @@ class ListenApp(ctk.CTk):
         self.configure(**theme.body())
         self._engine = None
         self._busy = False
-        self._pending_status = ""
+        self._load_seq = 0  # bumped per load, so a slower earlier load cannot overwrite a newer one
         self._loaded_source = ""  # the URL the text in the box ACTUALLY came from; set only on a load that worked
         self._events: queue.Queue = queue.Queue()
         self._cancel: threading.Event | None = None
@@ -206,15 +221,24 @@ class ListenApp(ctk.CTk):
             self.progress.set(max(0.0, min(1.0, float(fraction))))
             self.status.configure(text=str(message))
         elif kind == "text":
-            self._set_text(str(payload))
+            # Two loads can overlap (send a page, then a link before the first finishes). The
+            # queue delivers them in completion order, so a slow earlier load used to land last
+            # and overwrite the newer text while keeping the newer status line. Drop a stale one.
+            loaded = payload if isinstance(payload, _LoadResult) else _LoadResult(0, str(payload), "", "")
+            if loaded.seq and loaded.seq != self._load_seq:
+                return
+            self._set_text(loaded.text)
             self._loaded_source = source  # committed with the text, so a failed load can never leave a stale label
-            self.status.configure(text=self._pending_status or "Text ready")
+            self.status.configure(text=loaded.status or "Text ready")
         elif kind == "load_failed":
+            failed = payload if isinstance(payload, _LoadResult) else _LoadResult(0, "", "", str(payload))
+            if failed.seq and failed.seq != self._load_seq:
+                return  # a stale failure must not clear text a newer load just delivered
             # The box may still hold the previous piece of text. Clear it, so Summarize can never
             # label old text with the URL that just failed.
             self._set_text("")
             self._loaded_source = ""
-            self.status.configure(text=str(payload))
+            self.status.configure(text=failed.error)
         elif kind == "finished":
             self._finish(payload)
         elif kind == "bridged":
@@ -288,8 +312,10 @@ class ListenApp(ctk.CTk):
     def _on_upload(self) -> None:
         from tkinter import filedialog
 
+        # The filter is built from the extractors' own suffix list, so a format the app can read is
+        # never missing from the picker (and a format it cannot read is never offered).
         path = filedialog.askopenfilename(
-            filetypes=[("Documents", "*.txt *.md *.pdf *.docx"), ("All files", "*.*")]
+            filetypes=[("Documents", " ".join(f"*{s}" for s in SUPPORTED_SUFFIXES)), ("All files", "*.*")]
         )
         if not path:
             return
@@ -347,15 +373,16 @@ class ListenApp(ctk.CTk):
                        source_url: str = "") -> None:
         """Run an extractor off the Tk thread. The result comes back through the event queue."""
         self.status.configure(text=busy_status)
-        self._pending_status = ok_status
+        self._load_seq += 1
+        seq = self._load_seq  # this load's ticket; a later load bumps the counter and wins
 
         def worker() -> None:
             try:
-                self._events.put(("text", job(), source_url))
+                self._events.put(("text", _LoadResult(seq, job(), ok_status, ""), source_url))
             except (UnsupportedInput, ExtractError, ValueError, OSError, UnicodeDecodeError) as exc:
-                self._events.put(("load_failed", str(exc)))
+                self._events.put(("load_failed", _LoadResult(seq, "", "", str(exc))))
             except Exception as exc:  # reported in the window, not raised in a thread
-                self._events.put(("load_failed", f"{type(exc).__name__}: {exc}"))
+                self._events.put(("load_failed", _LoadResult(seq, "", "", f"{type(exc).__name__}: {exc}")))
 
         threading.Thread(target=worker, daemon=True).start()
 

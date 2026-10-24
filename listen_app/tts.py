@@ -33,7 +33,10 @@ SENTENCE_GAP_S = 0.2
 INTRA_OP_THREADS = 4  # ONNX Runtime CPU threads for the Kokoro graph
 G2P_MODEL = "en_core_web_sm"  # spaCy model misaki loads; must already be installed locally.
 
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+# Latin punctuation needs following space to be a sentence end ("3.14" and "arr[0].x" stay whole).
+# A full-width stop or comma used as a stop (。！？) is already a boundary with no space after it,
+# so Chinese and Japanese prose splits into sentences instead of arriving as one wrapped blob.
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+|(?<=[\u3002\uff01\uff1f])")
 MAX_PIECE_CHARS = 300  # measured ~1.1 tokens per char; 300 chars stays under MAX_TOKENS with margin
 
 
@@ -227,6 +230,34 @@ class SayEngine:
 
     def speak(self, text: str, voice: str, speed: float = 1.0) -> np.ndarray:
         return _join(self.iter_chunks(text, voice, speed), self.sample_rate)
+
+
+    def voice_names(self) -> list[str]:
+        """The voices `say -v ?` reports, so the voice menu can offer them like Kokoro's.
+
+        Without this the window crashed on switching to this engine: it asks every engine for its
+        voices, and the AttributeError left the app half-built with no message. A machine with no
+        readable voice list falls back to the default rather than raising.
+        """
+        try:
+            listed = subprocess.run([self.say_bin, "-v", "?"], capture_output=True, text=True,
+                                    timeout=10, check=False).stdout
+        except (OSError, subprocess.SubprocessError):
+            return [self.default_voice]
+        names: list[str] = []
+        for line in listed.splitlines():
+            # "Samantha (English (US))  en_US  # Hello! ..." — the name may hold spaces, and macOS
+            # adds a locale in brackets. `say -v Samantha` accepts the bare name, so the menu shows
+            # the short one, and the same voice listed for two locales appears once. The gap before
+            # the locale is a single space on current macOS ("Samantha (English (US)) en_US"), so
+            # matching two-or-more spaces there silently dropped every voice with a bracketed name.
+            match = re.match(r"^(.+?)\s+[a-z]{2,3}_[A-Z]{2,3}(?:\s|$)", line)
+            if not match:
+                continue
+            name = re.sub(r"\s*\([^()]*(?:\([^()]*\))?[^()]*\)\s*$", "", match.group(1)).strip()
+            if name and name not in names:
+                names.append(name)
+        return names or [self.default_voice]
 
 
 def default_model_dir() -> Path:

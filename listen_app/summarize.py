@@ -20,13 +20,21 @@ STOPWORDS = frozenset(
     who will with you your not no do does did been being than into also can could would should
     may might just about over more most some such only very too s t""".split()
 )
-_WORD = re.compile(r"[a-z][a-z']+")
+_WORD = re.compile(r"[^\W\d_]+(?:['\u2019][^\W\d_]+)*", re.UNICODE)
+# A script written without spaces (Chinese, Japanese, Korean) has no words to count, so a run of
+# these characters is scored as overlapping two-character shingles instead. Without this a whole
+# Chinese or Japanese page produced no words, so no points, so "No key points found in the text".
+_DENSE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+")
 DEFAULT_POINTS = 5
 MAX_POINT_CHARS = 240
 
 
 def _words(sentence: str) -> list[str]:
-    return [w for w in _WORD.findall(sentence.lower()) if w not in STOPWORDS and len(w) > 2]
+    lowered = sentence.lower()
+    words = [w for w in _WORD.findall(lowered) if w not in STOPWORDS and len(w) > 2]
+    if words:
+        return words
+    return [run[i:i + 2] for run in _DENSE.findall(lowered) for i in range(len(run) - 1)]
 
 
 def key_points(text: str, count: int = DEFAULT_POINTS) -> list[str]:
