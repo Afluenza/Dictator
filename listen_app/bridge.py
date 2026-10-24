@@ -141,9 +141,23 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
 
 
+def _safe_label(getter: Callable[[], str] | None) -> str:
+    """The engine label, or "" . Never raises into a request, and never carries anything but a name."""
+    if getter is None:
+        return ""
+    try:
+        return str(getter())[:40]
+    except Exception:
+        return ""
+
+
 def make_handler(token: str, on_payload: Callable[[dict], None],
-                 on_dictate: Callable[[], bool] | None = None):
-    """A request handler bound to one token and one delivery callback."""
+                 on_dictate: Callable[[], bool] | None = None,
+                 engine_label: Callable[[], str] | None = None):
+    """A request handler bound to one token and one delivery callback.
+
+    `engine_label` names the transcription engine for the popup. It is a label, never a key.
+    """
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "DictatorBridge/1"
@@ -273,7 +287,13 @@ def make_handler(token: str, on_payload: Callable[[dict], None],
             except Exception as exc:  # a broken receiver is reported, never a stack trace
                 self._send(500, {"ok": False, "error": type(exc).__name__})
                 return
-            self._send(200, {"ok": True, "recording": bool(state)})
+            reply = {"ok": True, "recording": bool(state)}
+            label = _safe_label(engine_label)
+            if label:
+                # Only when the window can name one. An absent key keeps the reply shape the
+                # extension already knows, so an unwired bridge answers exactly as it did before.
+                reply["engine"] = label
+            self._send(200, reply)
 
     return Handler
 
@@ -282,11 +302,13 @@ class Bridge:
     """The listening end. `on_payload` runs on a request thread, so it must be thread-safe."""
 
     def __init__(self, on_payload: Callable[[dict], None], token: str | None = None,
-                 port: int = DEFAULT_PORT, on_dictate: Callable[[], bool] | None = None) -> None:
+                 port: int = DEFAULT_PORT, on_dictate: Callable[[], bool] | None = None,
+                 engine_label: Callable[[], str] | None = None) -> None:
         self.token = token or load_token()
         self.port = port
         self._on_payload = on_payload
         self._on_dictate = on_dictate
+        self._engine_label = engine_label
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.error = ""
@@ -296,7 +318,8 @@ class Bridge:
         if self._server is not None:
             return True
         try:
-            server = _Server((HOST, self.port), make_handler(self.token, self._on_payload, self._on_dictate))
+            server = _Server((HOST, self.port), make_handler(self.token, self._on_payload,
+                                                             self._on_dictate, self._engine_label))
         except OSError as exc:
             self.error = f"port {self.port} is unavailable: {exc.strerror or exc}"
             return False

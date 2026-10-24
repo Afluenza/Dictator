@@ -302,6 +302,42 @@ def test_dictate_toggles_and_carries_no_audio():
         live.stop()
 
 
+def test_the_dictate_reply_names_the_engine_but_never_the_key():
+    """The popup shows which engine ran. That label is a name, not a credential: an API key must
+    never travel to the extension, so the reply is asserted to carry the name and nothing else."""
+    state: dict = {}
+    port = _free_port()
+    secret = "sk-must-not-travel-to-the-browser"
+    live = bridge.Bridge(lambda _payload: None, token="a" * 48, port=port,
+                         on_dictate=lambda: True, engine_label=lambda: "cloud")
+    assert live.start(), live.error
+    try:
+        status, body, raw = post(port, {}, path="/dictate")
+        assert status == 200
+        assert body == {"ok": True, "recording": True, "engine": "cloud"}
+        assert secret not in raw
+    finally:
+        live.stop()
+
+
+def test_a_broken_engine_label_is_left_out_instead_of_failing_the_request():
+    """A getter that raises must not turn a live microphone toggle into a 500."""
+    state: dict = {}
+    port = _free_port()
+
+    def broken() -> str:
+        raise RuntimeError("boom")
+
+    live = bridge.Bridge(lambda _payload: None, token="a" * 48, port=port,
+                         on_dictate=lambda: True, engine_label=broken)
+    assert live.start(), live.error
+    try:
+        status, body, _ = post(port, {}, path="/dictate")
+        assert status == 200 and body == {"ok": True, "recording": True}
+    finally:
+        live.stop()
+
+
 def test_dictate_needs_the_pairing_code():
     state: dict = {}
     live, port = _dictate_bridge(state)

@@ -48,3 +48,15 @@ components, which keep their own licences:
   a different engine and no borrowed source text. No OpenWhispr file is copied;
   its MIT licence applies if any of its code is ever taken in, and this notice
   is where that would be recorded.
+- requests 2.34.2 (Apache-2.0), the HTTP client used by the opt-in cloud
+  transcription path and by link fetching. Licence text: `LICENSE` in the
+  installed distribution.
+- keyring (MIT), optional: `pip install 'listen-app[keychain]'` stores the cloud
+  API key in the operating system's credential store. Without it the key is
+  written to `~/.listen-app/stt-key` with owner-only permissions. Licence text:
+  `LICENSE` in the installed distribution.
+
+Cloud transcription is bring-your-own-key and off unless the user selects it:
+audio is posted to an OpenAI-compatible `/audio/transcriptions` endpoint the
+user names, by `requests`, and to nothing else. No key, model or audio leaves
+the machine on the local path.
