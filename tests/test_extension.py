@@ -1718,3 +1718,175 @@ def test_every_declared_command_is_handled():
     background = (EXT / "background.js").read_text(encoding="utf-8")
     for command in manifest()["commands"]:
         assert f'"{command}"' in background, f"{command} is declared but never handled"
+
+
+# ----- Round 28: the blank window, part two, and the dictation hotkey wiring ---
+BLANK_SWAP = r"""
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const extractSrc = readFileSync(`${dir}/extract.js`, "utf8");
+const START = "https://outlook.live.com/mail/";
+const FILL = "Inbox: three messages, one from Sam about the deployment window. ".repeat(8);
+
+// Measured live 2026-10-21 on outlook.live.com/mail/: the page finished loading while blank and
+// filled in without throwing. The sequence modelled here is the one R24 does not cover: the body
+// poll sees text, and the very next read lands on a document that has swapped again (the mailbox
+// re-rendering its shell), so the single re-read R24 allows comes back empty as well.
+const page = { filled: false, polls: 0, extracts: 0 };
+function mountDocument() {
+  globalThis.document = {
+    title: "Mail",
+    body: { innerText: page.filled ? FILL : "", textContent: page.filled ? FILL : "" },
+    activeElement: null,
+    documentElement: { scrollHeight: 900 },
+    querySelectorAll: () => [],
+  };
+}
+mountDocument();
+globalThis.location = { href: START, hostname: "outlook.live.com" };
+globalThis.window = {
+  getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  getSelection: () => ({ rangeCount: 0, isCollapsed: true, toString: () => "" }),
+  scrollY: 0, scrollTo: () => {},
+};
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 12, url: START }] },
+  scripting: {
+    executeScript: async ({ files, func }) => {
+      if (files) {
+        globalThis.dictatorExtract = new Function(`${extractSrc}; return dictatorExtract;`)();
+        mountDocument();
+        return [{ result: null }];
+      }
+      const body = String(func);
+      if (body.includes("readyState")) return [{ result: "complete" }];
+      if (body.includes("innerText")) {
+        page.polls += 1;
+        if (page.polls >= 2) { page.filled = true; mountDocument(); }
+        return [{ result: page.filled }];
+      }
+      page.extracts += 1;
+      if (page.extracts === 2) { page.filled = false; mountDocument(); }
+      return [{ result: globalThis.dictatorExtract({}) }];
+    },
+  },
+};
+const sent = [];
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
+  return { ok: true, status: 200, json: async () => ({ ok: true, chars: 40 }) };
+};
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+const result = await client.sendPage("page");
+console.log(JSON.stringify({ result, extracts: page.extracts, polls: page.polls,
+                             sent: sent.length, text: sent[0] ? sent[0].text : "" }));
+"""
+
+
+def _blank_swap(tmp_path: Path) -> dict:
+    script = tmp_path / "blank_swap.mjs"
+    script.write_text(BLANK_SWAP, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT)], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    return json.loads(run.stdout)
+
+
+def test_a_mailbox_that_goes_blank_again_after_filling_is_still_read(tmp_path):
+    """The blank window is not one round trip: the poll can see text and the read still land on a
+    document that swapped again. One re-read then reports "Found no text" on a page that had text,
+    so the client keeps polling inside the same budget until a read actually returns text.
+    """
+    out = _blank_swap(tmp_path)
+    assert out["result"]["ok"] is True, out["result"]
+    assert "Inbox: three messages" in out["text"], out["text"][:80]
+    assert out["extracts"] == 3, out["extracts"]
+    assert out["sent"] == 1
+
+
+DICTATE_WIRING = r"""
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const mode = process.argv[3];           // "paired" or "unpaired"
+const posts = [];
+const badge = { text: null, title: null };
+let listener = null;
+const token = mode === "unpaired" ? "" : "abc123";
+
+// Only what background.js and client.js actually touch: storage, the action badge, the command
+// listener and fetch. No page, because a dictation toggle never reads one.
+globalThis.chrome = {
+  storage: { local: { get: async () => (token ? { "dictator.token": token } : {}), set: async () => {} } },
+  action: {
+    setBadgeText: async ({ text }) => { badge.text = text; },
+    setBadgeBackgroundColor: async () => {},
+    setTitle: async ({ title }) => { badge.title = title; },
+  },
+  commands: { onCommand: { addListener: (fn) => { listener = fn; } } },
+};
+globalThis.fetch = async (url, init) => {
+  posts.push({ url: String(url), method: init.method, headers: init.headers, body: init.body });
+  return { ok: true, status: 200, json: async () => ({ ok: true, recording: true }) };
+};
+
+// Importing the worker registers the listener the manifest's shortcut fires.
+await import(`${pathToFileURL(`${dir}/background.js`).href}?t=${Date.now()}`);
+if (!listener) throw new Error("background.js registered no command listener");
+await listener("dictate");
+const hotkey = posts.length ? posts[0] : null;
+
+// The popup's Dictate button calls this same exported function; nothing else may POST /dictate.
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}`);
+const button = await client.dictate();
+const viaButton = posts.length > 1 ? posts[1] : null;
+
+console.log(JSON.stringify({ hotkey, viaButton, button, badge, posts: posts.length }));
+"""
+
+
+def _dictate_wiring(tmp_path: Path, mode: str) -> dict:
+    script = tmp_path / "dictate_wiring.mjs"
+    script.write_text(DICTATE_WIRING, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT), mode], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    return json.loads(run.stdout)
+
+
+def test_the_dictate_hotkey_sends_the_same_bridge_request_as_the_popup_button(tmp_path):
+    """Alt+Shift+D must not be a second implementation of the dictation call.
+
+    Executed, not read: the worker's listener is fired the way the manifest fires it, then the
+    function the popup's Dictate button calls is called directly. Both requests have to match on
+    URL, method, headers and body, or the shortcut and the button could drift apart.
+    """
+    out = _dictate_wiring(tmp_path, "paired")
+    hotkey, button = out["hotkey"], out["viaButton"]
+    assert hotkey and button, out
+    assert hotkey["url"].endswith("/dictate"), hotkey["url"]
+    assert hotkey == button, f"hotkey {hotkey} vs button {button}"
+    assert out["posts"] == 2, out["posts"]
+    # The badge is the only feedback the user gets once the popup has closed.
+    assert out["badge"]["text"] == "REC", out["badge"]
+    assert out["badge"]["title"] == "Listening in Listen. Press again to stop.", out["badge"]
+
+
+def test_the_dictation_shortcut_reports_an_unpaired_app_instead_of_calling_it(tmp_path):
+    """With no pairing code there is nothing to send, so no request is made at all."""
+    out = _dictate_wiring(tmp_path, "unpaired")
+    assert out["posts"] == 0, out["posts"]
+    assert out["hotkey"] is None
+    assert out["button"]["ok"] is False
+    assert out["badge"]["text"] == "!", out["badge"]
+    assert "Not paired" in out["badge"]["title"], out["badge"]
+
+
+def test_the_popup_dictate_button_routes_through_the_shared_client_call():
+    """The popup must import the one dictation function, not POST to the bridge itself. Its own
+    fetch would need its own token handling and could disagree with the hotkey's."""
+    popup = (EXT / "popup.js").read_text(encoding="utf-8")
+    assert "dictate" in popup.split('from "./client.js"')[0], "dictate must be imported from client.js"
+    assert "await dictate()" in popup, popup[:400]
+    assert "fetch(" not in popup, "the popup must never talk to the bridge on its own"
