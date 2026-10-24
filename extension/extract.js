@@ -352,6 +352,21 @@ function dictatorExtract(options) {
     return document.querySelectorAll("ytd-comment-thread-renderer").length === 0;
   }
 
+  // Mobile YouTube is a different page, not a narrow desktop one: there is no comments section at
+  // all, only a "Comments 1K" teaser that opens a sheet. Scrolling does nothing (measured live
+  // 2026-10-24: scrolled to the bottom, still 0 comments after 6 s), and the first tap on the teaser
+  // mounts 20. So mobile asks for a different reveal, and the caller taps instead of scrolling.
+  // The teaser is identified by its own tag, never by the word "Comments", so the recommended-videos
+  // carousel heading cannot be tapped by mistake. Measured live on three videos.
+  const YT_MOBILE_TEASER = 'yt-video-metadata-carousel-view-model[role="button"], ytm-comments-entry-point-header-renderer';
+  function needsMobileCommentTap() {
+    if (!hostMatches(host, "youtube.com")) return false;
+    // Desktop already has #below's comments container; the teaser is the mobile-only signal.
+    if (document.querySelectorAll(YT_COMMENTS).length) return false;
+    if (document.querySelectorAll("ytm-comment-renderer").length) return false;
+    return document.querySelectorAll(YT_MOBILE_TEASER).length > 0;
+  }
+
   // The generic fallback: the container with the most real prose in it. Picking the single
   // longest paragraph was wrong on a comment thread, where one long comment beat the post, and
   // on an index page, where the longest paragraph is a teaser. Scoring containers by their
@@ -530,7 +545,12 @@ function dictatorExtract(options) {
   // rather than sending the description alone.
   // Compare against null, not truthiness: a saved position of 0 is the common case (the reader was
   // at the top), and treating it as "no restore" made this pass ask for another one, forever.
-  const reveal = restoreScrollTo === null && needsCommentReveal();
+  // Two different reveals for two different pages: desktop scrolls to the comments section, mobile
+  // taps the teaser that opens the comments sheet. The caller is told which one, rather than
+  // guessing from the URL.
+  const available = restoreScrollTo === null;
+  const mobileTap = available && needsMobileCommentTap();
+  const reveal = available && !mobileTap && needsCommentReveal();
   return finish({
     text,
     // empty when nothing was read, so the caller says so instead of sending a blank page
@@ -540,7 +560,9 @@ function dictatorExtract(options) {
     truncated,
     // 0 is the honest answer "the tab has not been scrolled", which the caller cannot tell from
     // a missing field, so the flag travels with it.
-    revealComments: reveal,
-    scrollY: reveal ? Math.round(window.scrollY || 0) : null,
+    revealComments: reveal || mobileTap,
+    // "scroll" for desktop, "tap" for mobile; absent when no second pass is wanted.
+    revealMode: reveal ? "scroll" : mobileTap ? "tap" : "",
+    scrollY: reveal || mobileTap ? Math.round(window.scrollY || 0) : null,
   });
 }

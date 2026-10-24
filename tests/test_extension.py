@@ -1046,6 +1046,331 @@ def test_a_mobile_youtube_page_with_the_sheet_closed_reads_only_the_description(
     assert result["how"] == "video"
     assert "Comments:" not in result["text"]
 
+def test_a_mobile_youtube_page_asks_for_the_comments_sheet_to_be_tapped(tmp_path):
+    """Regression, measured live 2026-10-24 on m.youtube.com: the page has no comments section at
+    all, so scrolling mounted nothing (0 renderers after scrolling to the bottom and waiting 6 s).
+    The teaser has to be tapped, and the extractor has to ask for that instead of quietly sending
+    the description alone — 2,362 characters against 3,862 with the conversation.
+    """
+    result = extract({
+        "url": "https://m.youtube.com/watch?v=abc", "host": "m.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"The description of the video."}'},
+            {"tag": "yt-video-metadata-carousel-view-model", "attrs": {"role": "button"},
+             "text": "Comments2.4M"},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is True
+    assert result["revealMode"] == "tap", result.get("revealMode")
+    # the position still travels, so the reader's tab is left where they had it
+    assert result["scrollY"] == 0
+
+
+def test_the_recommended_videos_heading_is_not_mistaken_for_the_teaser(tmp_path):
+    """The mobile page's own carousel heading reads "Comments" too; only the teaser's tag counts.
+
+    The teaser is identified by tag so a page whose only "Comments" text is the recommended list is
+    not reported as a page that can be tapped, which would send the popup looking for nothing.
+    """
+    result = extract({
+        "url": "https://m.youtube.com/watch?v=abc", "host": "m.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"The description of the video."}'},
+            {"tag": "h2", "attrs": {"class": "ytCarouselTitleViewModelTitle"}, "text": "Comments"},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is False
+    assert result["revealMode"] == ""
+
+
+def test_the_desktop_page_still_asks_for_a_scroll_not_a_tap(tmp_path):
+    """Two different reveals, and the page that already has a comments section keeps the scroll."""
+    result = extract({
+        "url": "https://www.youtube.com/watch?v=abc", "host": "www.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"A description long enough to be read."}'},
+            {"tag": "ytd-comments", "children": [{"tag": "div", "text": "Comments loading"}]},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is True
+    assert result["revealMode"] == "scroll", result.get("revealMode")
+
+
+def test_a_mobile_page_that_already_has_comments_asks_for_nothing(tmp_path):
+    """The sheet is already open (the reader opened it); reading it must not re-open or close it."""
+    result = extract({
+        "url": "https://m.youtube.com/watch?v=abc", "host": "m.youtube.com",
+        "body": {"children": [
+            {"tag": "script", "text": '{"shortDescription":"The description of the video."}'},
+            {"tag": "yt-video-metadata-carousel-view-model", "attrs": {"role": "button"},
+             "text": "Comments2.4M"},
+            {"tag": "ytm-comment-renderer", "children": [
+                {"tag": "button", "attrs": {"class": "YtmCommentRendererContent"},
+                 "text": "A mobile comment the reader had already opened."}]},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is False
+    assert "A mobile comment the reader had already opened." in result["text"]
+
+
+MOBILE_TAP = r"""
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const extractSrc = readFileSync(`${dir}/extract.js`, "utf8");
+
+// The measured mobile page, 2026-10-24: no comments until the teaser is tapped, 20 renderers after
+// it, and a close button on the sheet that puts the page back. Every dispatch is recorded so the
+// test can prove a pointer sequence was sent rather than a bare click.
+const page = { open: false, closed: false, events: [], scrollY: 0 };
+function renderer(n) {
+  return { innerText: `Mobile comment number ${n} about the video.`,
+           getBoundingClientRect: () => ({ width: 300, height: 40, left: 10, top: 200 }) };
+}
+function makeDocument() {
+  const teaser = {
+    innerText: "Comments2.4M", tagName: "YT-VIDEO-METADATA-CAROUSEL-VIEW-MODEL",
+    getBoundingClientRect: () => ({ width: 358, height: 92, left: 8, top: 300 }),
+    getAttribute: () => "button",
+    dispatchEvent(ev) { page.events.push(ev.type); page.open = true; return true; },
+  };
+  const close = {
+    innerText: "", tagName: "BUTTON",
+    getAttribute: (name) => (name === "aria-label" ? "Close" : null),
+    getBoundingClientRect: () => ({ width: 48, height: 48, left: 330, top: 20 }),
+    dispatchEvent(ev) { page.events.push(`close:${ev.type}`); page.closed = true; return true; },
+  };
+  return {
+    title: "A mobile video",
+    body: { innerText: "watch page" },
+    documentElement: { scrollHeight: 4000 },
+    querySelectorAll: (sel) => {
+      if (sel.includes("ytm-comment-renderer")) {
+        return page.open ? [1, 2, 3].map(renderer) : [];
+      }
+      if (sel.includes("yt-video-metadata-carousel-view-model")) return page.open ? [] : [teaser];
+      if (sel === "button, [role='button']") return [close];
+      if (sel.includes("script")) {
+        return [{ textContent: '{"shortDescription":"The description of the video."}' }];
+      }
+      return [];
+    },
+    querySelector: (sel) => (sel.includes("yt-video-metadata-carousel-view-model") ? teaser : null),
+    activeElement: null,
+  };
+}
+const calls = [];
+const sent = [];
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 21, url: "https://m.youtube.com/watch?v=abc" }] },
+  scripting: {
+    executeScript: async ({ files, func, args }) => {
+      const body = String(func);
+      calls.push(files ? "inject"
+        : body.includes("yt-video-metadata-carousel-view-model") ? "reveal"
+        : body.includes("aria-label") ? "close"
+        : body.includes("ytm-comment-renderer") ? "poll"
+        : "extract");
+      if (files) {
+        globalThis.location = { href: "https://m.youtube.com/watch?v=abc", hostname: "m.youtube.com" };
+        globalThis.document = makeDocument();
+        globalThis.window = {
+          getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+          getSelection: () => ({ rangeCount: 0, isCollapsed: true, toString: () => "" }),
+          scrollY: page.scrollY, scrollTo: () => {},
+        };
+        globalThis.dictatorExtract = new Function(`${extractSrc}; return dictatorExtract;`)();
+        return [{ result: null }];
+      }
+      if (body.includes("yt-video-metadata-carousel-view-model")) {
+        globalThis.document.querySelector("yt-video-metadata-carousel-view-model").dispatchEvent({ type: "pointerdown" });
+        return [{ result: null }];
+      }
+      if (body.includes("aria-label")) {
+        globalThis.document.querySelectorAll("button, [role='button']")[0].dispatchEvent({ type: "click" });
+        return [{ result: true }];
+      }
+      if (body.includes("ytm-comment-renderer")) {
+        return [{ result: page.open }];
+      }
+      const opts = { preferSelection: args[0] };
+      if (args.length > 1) opts.restoreScrollTo = args[1];
+      return [{ result: globalThis.dictatorExtract(opts) }];
+    },
+  },
+};
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
+  return { ok: true, status: 200, json: async () => ({ ok: true, chars: 1 }) };
+};
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+const result = await client.sendPage("page");
+console.log(JSON.stringify({ result, calls, events: page.events, closed: page.closed,
+                             open: page.open, text: sent[0] ? sent[0].text : "" }));
+"""
+
+
+def test_the_popup_taps_the_mobile_teaser_then_closes_the_sheet_it_opened(tmp_path):
+    """The shipped client.js on the mobile page: tap, wait, read, and put the page back.
+
+    Measured live 2026-10-24: a bare MouseEvent("click") is ignored by the teaser's handler, so the
+    tap is a pointerdown/pointerup/click sequence. The sheet the popup opened must be closed again,
+    or the reader is left looking at comments they never asked to open.
+    """
+    script = tmp_path / "mobile_tap.mjs"
+    script.write_text(MOBILE_TAP, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT)], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    out = json.loads(run.stdout)
+    assert out["result"]["ok"] is True, out["result"]
+    assert out["calls"] == ["inject", "extract", "reveal", "poll", "extract", "close"], out["calls"]
+    assert out["events"] == ["pointerdown", "close:click"], out["events"]
+    assert out["closed"] is True, "the popup must close the sheet it opened"
+    assert "The description of the video." in out["text"]
+    assert "Mobile comment number 1" in out["text"]
+    assert "Comments:" in out["text"]
+
+
+def test_the_desktop_path_never_sends_a_tap_or_a_close(tmp_path):
+    """A page with a comments section is scrolled, not tapped, and nothing is closed on it."""
+    source = (EXT / "client.js").read_text(encoding="utf-8")
+    assert 'page.revealMode === "tap"' in source, "the caller must branch on the page's own answer"
+    assert "if (tapped)" in source, "closing the sheet must be conditional on the tap path"
+
+
+# ----- round 27: the popup's own send path, against a real bridge ------------
+# These run the shipped client.js in Node, over real HTTP, against the app's real bridge code on an
+# ephemeral port. Only the port number is remapped in the harness (the extension ships a fixed
+# 127.0.0.1:8765); everything else — the JSON body, the pairing header, the byte and character caps
+# and their status codes — is the production path.
+LIMITS = r"""
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const realPort = process.argv[3];
+const fixture = JSON.parse(readFileSync(process.argv[4], "utf8"));
+
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": fixture.token }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 3, url: "https://example.com/long" }] },
+  scripting: {
+    executeScript: async ({ files, func, args }) => {
+      if (files) {
+        globalThis.location = { href: "https://example.com/long", hostname: "example.com" };
+        // A real article of LONG_TEXT characters, so the trim to the cap is exercised rather than a
+        // page that reads empty.
+        const article = {
+          innerText: "word ".repeat(fixture.long),
+          getBoundingClientRect: () => ({ width: 800, height: 4000 }),
+        };
+        const body = { innerText: article.innerText, textContent: article.innerText };
+        globalThis.document = {
+          title: "A long page", body, activeElement: null,
+          querySelectorAll: (sel) => {
+            if (sel.includes("script")) return [];
+            if (sel === "article") return [article];
+            return [];
+          },
+        };
+        globalThis.window = {
+          getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+          getSelection: () => ({ rangeCount: 0, isCollapsed: true, toString: () => "" }),
+        };
+        globalThis.dictatorExtract = new Function(`${readFileSync(`${dir}/extract.js`, "utf8")}; return dictatorExtract;`)();
+        return [{ result: null }];
+      }
+      return [{ result: globalThis.dictatorExtract({ preferSelection: args ? args[0] : true }) }];
+    },
+  },
+};
+// The one stub: the extension ships a fixed port. Everything else below is the real socket.
+const realFetch = globalThis.fetch;
+globalThis.fetch = (url, init) =>
+  realFetch(String(url).replace("127.0.0.1:8765", `127.0.0.1:${realPort}`), init);
+
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+const out = {};
+// 1. exactly the documented cap, through send() — the path "Send this page" uses
+out.atCap = await client.send({ kind: "text", text: "a".repeat(fixture.cap), url: "https://example.com/long" });
+// 2. one character more, which the bridge must refuse with its 400
+out.overCap = await client.send({ kind: "text", text: "a".repeat(fixture.cap + 1), url: "https://example.com/long" });
+// 3. the same cap in emoji, which JSON escapes to about 720 KB: the worst case the byte cap is
+//    sized for, and the one a 200 KB cap refused before round 26
+out.emojiCap = await client.send({ kind: "text", text: "\u{1F600}".repeat(fixture.cap) });
+// 4. a page far over the cap: extract.js trims to the cap, so the send itself succeeds
+out.sendPage = await client.sendPage("page");
+console.log(JSON.stringify(out));
+"""
+
+
+def _bridge_for_limits():
+    """A real bridge on its own port, with the payloads it received."""
+    import socket
+
+    from listen_app import bridge as py_bridge
+
+    received: list[dict] = []
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    token = "b" * 48
+    live = py_bridge.Bridge(received.append, token=token, port=port)
+    assert live.start(), live.error
+    return live, received, port, token
+
+
+def test_the_send_path_accepts_exactly_the_cap_and_the_bridge_refuses_one_more(tmp_path):
+    """Round 26 raised the bridge's byte cap so 60,000 characters arrive. This proves the popup's
+    own send() path, over a real socket, hits both sides of that limit: 60,000 accepted with a
+    character count in the message, 60,001 refused with the bridge's own refusal.
+    """
+    from listen_app.bridge import MAX_TEXT
+
+    live, received, port, token = _bridge_for_limits()
+    try:
+        script = tmp_path / "limits.mjs"
+        script.write_text(LIMITS, encoding="utf-8")
+        fixture = tmp_path / "limits.json"
+        fixture.write_text(json.dumps({"token": token, "cap": MAX_TEXT, "long": 30_000}),
+                           encoding="utf-8")
+        run = subprocess.run([node(), str(script), str(EXT), str(port), str(fixture)],
+                             capture_output=True, text=True, encoding="utf-8", timeout=90)
+        assert run.returncode == 0, run.stderr[:600]
+        out = json.loads(run.stdout)
+    finally:
+        live.stop()
+
+    at_cap = out["atCap"]
+    assert at_cap["ok"] is True, at_cap
+    assert "60,000 characters" in at_cap["message"], at_cap["message"]
+    assert len(received[0]["text"]) == MAX_TEXT
+
+    over = out["overCap"]
+    assert over["ok"] is False, over
+    # the refusal the bridge itself wrote, relayed by the popup: not a client-side guess
+    assert over["message"] == "text is longer than 60000 characters", over["message"]
+
+    # a page far over the cap is trimmed by extract.js, so it still sends and arrives whole
+    assert out["sendPage"]["ok"] is True, out["sendPage"]
+    assert "trimmed to 60,000 characters" in out["sendPage"]["message"], out["sendPage"]["message"]
+
+    # The worst case the byte cap exists for: 60,000 emoji is about 720 KB once JSON escapes it,
+    # and it must be accepted end to end rather than refused by a 200 KB byte cap.
+    emoji = out["emojiCap"]
+    assert emoji["ok"] is True, emoji
+    assert len(received[1]["text"]) == MAX_TEXT
+    assert received[1]["text"][0] == "\U0001F600"
+
+    # Three deliveries, in order: at-cap text, at-cap emoji, trimmed page. The over-cap send was
+    # refused at the bridge, so it is not among them, and no delivered text is 60,001 characters.
+    assert len(received) == 3, [len(item.get("text") or "") for item in received]
+    assert received[0]["text"] == "a" * MAX_TEXT
+    assert len(received[2]["text"]) == MAX_TEXT
+    assert all(len(item["text"]) != MAX_TEXT + 1 for item in received), "the refused send was delivered"
+
+
 
 # ----- round 22: walls and missing pages the phrase list missed --------------
 # Each of these was measured live in Chromium on 2026-10-20 and came back as readable page text
