@@ -233,11 +233,16 @@ def test_the_key_file_is_owner_only(config):
     if sys.platform == "win32":
         acl = subprocess.run(["icacls", str(target)], capture_output=True, text=True, timeout=30)
         assert acl.returncode == 0, acl.stderr
-        # Only this account may appear; an inherited Everyone/Users entry must be gone.
-        grantees = [line.split(":")[0].strip() for line in acl.stdout.splitlines() if ":" in line]
-        others = [g for g in grantees if g and "BUILTIN" not in g and "NT AUTHORITY" not in g
-                  and os.environ.get("USERNAME", "") not in g]
-        assert others == [], f"the key file is readable by {others}: {acl.stdout}"
+        output = acl.stdout
+        # A grantee line reads "<path> ACCOUNT:(F)". Parsing on ":" is wrong (the path starts with
+        # "C:"), so this asserts on the absence of the broad grantees instead, then that the
+        # account itself is the one granted.
+        for broad in ("Everyone", "BUILTIN\\Users", "Authenticated Users", "Users:("):
+            assert broad not in output, f"{broad} can still read the key file: {output}"
+        user = os.environ.get("USERNAME", "")
+        assert user and f"\\{user}:(" in output, f"the key file is not granted to {user}: {output}"
+        # icacls prints the grantee names; anything with a broad or a group SID is a leak.
+        assert "(I)" not in output, f"an inherited entry is still present: {output}"
         return
 
     assert target.stat().st_mode & 0o777 == 0o600, oct(target.stat().st_mode & 0o777)
