@@ -13,17 +13,33 @@ def test_a_failed_load_clears_the_box_so_a_summary_cannot_mislabel_old_text():
 
     Before the fix, a failed link load left the previous text in the box AND set the pending
     source to the URL that failed, so Summarize would have labelled old text with the wrong link.
+    Proven by driving the handler, not by matching source text: an assertion about one exact
+    statement breaks on any refactor that keeps the behaviour, and proves nothing when it passes.
     """
-    import inspect
+    import queue
 
     from listen_app import gui
 
-    source = inspect.getsource(gui.ListenApp)
-    assert '"load_failed"' in source, "the worker must report a failed load as its own event"
-    assert 'self._events.put(("text", job(), source_url))' in source, "the URL travels with the text"
-    assert '_loaded_source = ""' in source, "a failed load must forget the source"
-    # And it must be the field Summarize reads, not the one the worker sets up front.
-    assert "_loaded_source" in inspect.getsource(gui.ListenApp._on_summarize)
+    app = gui.ListenApp.__new__(gui.ListenApp)
+    app._events = queue.Queue()
+    app._load_seq = 0
+    app._loaded_source = "https://example.com/old"
+    app._busy = False
+    boxed: list[str] = []
+    app._set_text = boxed.append
+    statuses: list[str] = []
+    app.status = type("S", (), {"configure": lambda _self, **kw: statuses.append(kw.get("text", ""))})()
+
+    def fail(_path):
+        raise OSError("no such file")
+
+    app._extract_async(lambda: fail("/nowhere.txt"), "Loaded nowhere.txt", "Reading file...")
+    while not app._events.empty():
+        app._handle(*app._events.get())  # the same call _poll makes
+
+    assert boxed == [""], "a failed load must clear the box, so old text cannot be summarised"
+    assert app._loaded_source == "", "a failed load must forget the source it never got text from"
+    assert statuses[-1] == "no such file", "the reason reaches the status line"
 
 
 def test_a_transcript_reaches_the_box_and_is_pasted_at_the_cursor():

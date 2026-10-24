@@ -13,7 +13,6 @@ Libraries (all permissive, see THIRD_PARTY_NOTICES.md):
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
 
 TEXT_SUFFIXES = (".txt", ".md")
 PDF_SUFFIXES = (".pdf",)
@@ -30,9 +29,17 @@ class ExtractError(Exception):
 
 
 def validate_url(url: str) -> str:
+    """The link the window will read, or a ValueError naming what to paste instead.
+
+    The rule itself lives in listen_app.social_read.is_web_link, because that is the function the
+    reader and the bridge gate on. Keeping a second, looser check here let a link through the
+    window and then be refused by the reader ("https://example.com/a b" passed this and failed
+    is_web_link), so the user saw a load error for a link the window had already accepted.
+    """
+    from listen_app.social_read import is_web_link
+
     cleaned = url.strip()
-    parts = urlparse(cleaned)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    if not is_web_link(cleaned):
         raise ValueError("paste a full http:// or https:// link")
     return cleaned
 
