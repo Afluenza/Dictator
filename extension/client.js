@@ -169,6 +169,61 @@ async function injectAndExtract(tabId, preferSelection) {
   return results;
 }
 
+/* The two reveals, at module scope because chrome.scripting serialises these by their source: each
+ * one has to stand alone, with no reference to anything in this file. */
+
+/* Desktop: scroll the comments section into view so YouTube mounts it. #below first, because at a
+ * narrow window the document's first ytd-comments is the hidden engagement-panel copy, and
+ * scrolling to it moves nothing. */
+function revealComments(tap) {
+  if (tap) {
+    // Mobile has no comments section to scroll to; its teaser opens a sheet. Identified by tag, so
+    // the recommended-videos carousel heading cannot be hit instead.
+    const teaser = document.querySelector(
+      'yt-video-metadata-carousel-view-model[role="button"], ytm-comments-entry-point-header-renderer');
+    if (!teaser) return;
+    const box = teaser.getBoundingClientRect();
+    const at = {
+      bubbles: true, cancelable: true, view: window,
+      clientX: Math.round(box.left + box.width / 2), clientY: Math.round(box.top + box.height / 2),
+    };
+    // A real pointer sequence: these handlers ignore a bare click().
+    for (const type of ["pointerdown", "pointerup", "click"]) {
+      teaser.dispatchEvent(new MouseEvent(type, at));
+    }
+    return;
+  }
+  const box = document.querySelector("#below #comments, #below ytd-comments, ytd-comments");
+  if (box) box.scrollIntoView({ block: "start" });
+  if (!window.scrollY) window.scrollTo(0, document.documentElement.scrollHeight);
+}
+
+/* Are the comments in the DOM yet? Both layouts, since the caller does not know which it got. */
+function commentsAreMounted() {
+  return document.querySelectorAll("ytd-comment-thread-renderer").length > 0
+    || document.querySelectorAll("ytm-comment-renderer").length > 0;
+}
+
+/* Mobile opened a sheet over the page; leave it as the reader had it. Only ever called on the tap
+ * path, so a sheet the reader opened themselves is never touched. */
+function closeCommentSheet() {
+  const buttons = document.querySelectorAll("button, [role='button']");
+  for (const button of buttons) {
+    const label = (button.getAttribute("aria-label") || "").toLowerCase();
+    const box = button.getBoundingClientRect();
+    if (label !== "close" || box.width < 20 || box.height < 20) continue;
+    const at = {
+      bubbles: true, cancelable: true, view: window,
+      clientX: Math.round(box.left + box.width / 2), clientY: Math.round(box.top + box.height / 2),
+    };
+    for (const type of ["pointerdown", "pointerup", "click"]) {
+      button.dispatchEvent(new MouseEvent(type, at));
+    }
+    return true;
+  }
+  return false;
+}
+
 /* Extract the page in the active tab and send it. "auto" prefers a selection, "page" ignores it. */
 export async function sendPage(mode = "auto") {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -209,15 +264,11 @@ export async function sendPage(mode = "auto") {
   // restored to where the reader had it.
   if (page && page.revealComments) {
     try {
+      const tapped = page.revealMode === "tap";
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: () => {
-          // #below first: at a narrow window the document's first ytd-comments is the hidden
-          // engagement-panel copy, and scrolling to it moves nothing.
-          const box = document.querySelector("#below #comments, #below ytd-comments, ytd-comments");
-          if (box) box.scrollIntoView({ block: "start" });
-          if (!window.scrollY) window.scrollTo(0, document.documentElement.scrollHeight);
-        },
+        func: revealComments,
+        args: [tapped],
       });
       // Wait for the comments to actually mount rather than guessing a delay: a fixed 2.5 s was
       // measured sufficient in a fresh tab and not sufficient in a normal one, where the video is
@@ -226,7 +277,7 @@ export async function sendPage(mode = "auto") {
         await new Promise((resolve) => setTimeout(resolve, 400));
         const ready = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
-          func: () => document.querySelectorAll("ytd-comment-thread-renderer").length > 0,
+          func: commentsAreMounted,
         });
         if (ready && ready[0] && ready[0].result) break;
       }
@@ -237,6 +288,14 @@ export async function sendPage(mode = "auto") {
         args: [mode === "auto", page.scrollY || 0],
       });
       page = (results && results[0] && results[0].result) || page;
+      // The mobile tap opened a sheet over the page. The read is done, so put the page back the way
+      // the reader had it. Only on the tap path: a sheet the reader opened themselves is left alone.
+      if (tapped) {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: closeCommentSheet,
+        });
+      }
     } catch {
       // The reveal is best effort: if it fails, the description already read is still sent.
     }
