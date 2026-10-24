@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 from pathlib import Path
 from typing import Callable, Protocol
@@ -171,8 +172,39 @@ def save_key(key: str) -> str:
     target = key_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(cleaned, encoding="utf-8")
-    target.chmod(0o600)
+    _restrict_to_owner(target)
     return "file"
+
+
+def _restrict_to_owner(path: Path) -> None:
+    """Make the key file readable by this account only.
+
+    POSIX mode bits are the whole story on macOS and Linux. On Windows they are not: chmod sets
+    the read-only attribute and nothing else, so the file inherits the folder's ACL and other
+    accounts can read it. There an explicit owner-only DACL is the real restriction, applied with
+    icacls. If that cannot be done the key is not left sitting in a shared file: the write is
+    undone and the caller reports it.
+    """
+    if os.name != "nt":
+        path.chmod(0o600)
+        return
+    _windows_owner_only(path, user=os.environ.get("USERNAME", ""))
+
+
+def _windows_owner_only(path: Path, user: str) -> None:
+    """Remove inherited ACL entries and grant the one account full control. Raises on failure."""
+    try:
+        done = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        path.unlink(missing_ok=True)
+        raise OSError(f"could not restrict the key file to this account: {exc}") from exc
+    if done.returncode != 0:
+        path.unlink(missing_ok=True)
+        detail = (done.stderr or done.stdout or "").strip()[:200]
+        raise OSError(f"could not restrict the key file to this account: {detail}")
 
 
 def clear_key() -> None:

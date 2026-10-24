@@ -10,6 +10,7 @@ av LGPL-3.0 (as a wheel-bundled shared library), soundfile BSD-3. All GPL-free.
 """
 
 import importlib.util
+import os
 import threading
 import time
 from pathlib import Path
@@ -216,10 +217,78 @@ def test_a_saved_key_is_readable_and_removable(config):
 
 
 def test_the_key_file_is_owner_only(config):
-    """With no keychain, the fallback file must not be world-readable."""
+    """With no keychain, the fallback file must not be readable by another account.
+
+    The check differs by platform because the mechanism does. On POSIX the mode bits are the
+    whole story; on Windows they are not (chmod only sets the read-only attribute), so the test
+    reads the real DACL back with icacls instead of trusting a chmod that did nothing. Windows CI
+    is what caught that: the file came back 0o666 and the mode assertion failed there.
+    """
+    import subprocess
+    import sys
+
     assert dictate.save_key("sk-owner-only") == "file"
-    mode = dictate.key_file().stat().st_mode & 0o777
-    assert mode == 0o600, oct(mode)
+    target = dictate.key_file()
+
+    if sys.platform == "win32":
+        acl = subprocess.run(["icacls", str(target)], capture_output=True, text=True, timeout=30)
+        assert acl.returncode == 0, acl.stderr
+        # Only this account may appear; an inherited Everyone/Users entry must be gone.
+        grantees = [line.split(":")[0].strip() for line in acl.stdout.splitlines() if ":" in line]
+        others = [g for g in grantees if g and "BUILTIN" not in g and "NT AUTHORITY" not in g
+                  and os.environ.get("USERNAME", "") not in g]
+        assert others == [], f"the key file is readable by {others}: {acl.stdout}"
+        return
+
+    assert target.stat().st_mode & 0o777 == 0o600, oct(target.stat().st_mode & 0o777)
+
+
+def test_icacls_is_asked_for_an_owner_only_acl(config, monkeypatch):
+    """The Windows branch on any platform: inheritance removed, one grantee, the account named.
+
+    Faking os.name would break pathlib on this machine, so the branch is a function of its own and
+    driven directly. What this cannot prove on macOS is that Windows enforces the DACL; the Windows
+    CI job proves that by reading the ACL back with icacls.
+    """
+    target = config / "stt-key"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("sk-windows-key", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class Ok:
+        returncode = 0
+        stdout = "processed file"
+        stderr = ""
+
+    monkeypatch.setattr(dictate.subprocess, "run", lambda argv, **k: calls.append(list(argv)) or Ok())
+    dictate._windows_owner_only(target, user="tester")
+
+    assert calls and calls[0][0] == "icacls", calls
+    assert "/inheritance:r" in calls[0], calls
+    assert "/grant:r" in calls[0] and "tester:F" in calls[0], calls
+    assert target.exists()
+
+
+def test_a_key_that_cannot_be_restricted_is_removed_rather_than_left_shared(config, monkeypatch):
+    """If the OS refuses to lock the file down, the key must not sit in a readable file.
+
+    The failure is closed, not silent: the write is undone and the caller is told, rather than a
+    readable key being left on disk with a cheerful "saved".
+    """
+    target = config / "stt-key"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("sk-cannot-be-restricted", encoding="utf-8")
+
+    class Failed:
+        returncode = 5
+        stdout = ""
+        stderr = "Access is denied."
+
+    monkeypatch.setattr(dictate.subprocess, "run", lambda *a, **k: Failed())
+    with pytest.raises(OSError) as excinfo:
+        dictate._windows_owner_only(target, user="tester")
+    assert "restrict" in str(excinfo.value)
+    assert not target.exists(), "a key that cannot be locked down must not be left on disk"
 
 
 def test_cloud_needs_https_except_on_this_machine(config):
@@ -291,6 +360,10 @@ class StubEndpoint:
 
         class Server(http.server.ThreadingHTTPServer):
             daemon_threads = True
+            # The stdlib default backlog is 5, so eight simultaneous connects get REFUSED and
+            # surface as ConnectionError. That is the stub's limit, not the engine's: raise it so
+            # the concurrency test measures the client, not the test server.
+            request_queue_size = 64
 
             def handle_error(self, request, client_address):
                 pass  # a client that timed out mid-reply is the point of one of these tests
