@@ -157,6 +157,12 @@ async function waitForText(tabId, ceilingMs) {
   return false;
 }
 
+/* Is this a read worth sending? The same rule the caller applies at the end, named once so the
+ * blank-page wait can ask it without repeating the comparison. */
+function hasText(page) {
+  return Boolean(page && page.text && page.text.trim().length >= 2);
+}
+
 /* Inject extract.js, then read the value back. Two injections share one isolated world, so the
  * extraction stays a readable file instead of being copied inline here. */
 async function injectAndExtract(tabId, preferSelection) {
@@ -305,9 +311,14 @@ export async function sendPage(mode = "auto") {
   // and read once more the moment it has text. Bounded, and scoped by host so an ordinary empty
   // page keeps answering at once instead of waiting six seconds to say nothing.
   const startedOn = hostOf(tab.url);
-  const wentBlank = !page || !page.text || page.text.trim().length < 2;
-  if (wentBlank && BLANK_PAGE_HOSTS.some((known) => startedOn === known || startedOn.endsWith("." + known))) {
-    if (await waitForText(tab.id, 6000)) {
+  if (!hasText(page) && BLANK_PAGE_HOSTS.some((known) => startedOn === known || startedOn.endsWith("." + known))) {
+    // One budget for the whole blank window, not one per attempt: the mailbox was measured to fill
+    // by 2.5 s, but a read that lands on a document that swaps again comes back empty, and a single
+    // re-read then sent "Found no text" about a page that had text. So poll and read until a read
+    // actually carries text, or the six seconds are spent.
+    const deadline = Date.now() + 6000;
+    while (!hasText(page) && Date.now() < deadline) {
+      if (!(await waitForText(tab.id, deadline - Date.now()))) break;
       try {
         results = await injectAndExtract(tab.id, mode === "auto");
         const later = results && results[0] && results[0].result;
@@ -328,7 +339,7 @@ export async function sendPage(mode = "auto") {
       }
     }
   }
-  if (!page || !page.text || page.text.trim().length < 2) {
+  if (!hasText(page)) {
     // extract.js names why it refused a page instead of sending the site's sign-in or 404 copy as
     // if it were the post. Saying so is the difference between "nothing here" and "log in first".
     const why = {
