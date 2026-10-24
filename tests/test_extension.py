@@ -1883,6 +1883,46 @@ def test_the_dictation_shortcut_reports_an_unpaired_app_instead_of_calling_it(tm
     assert "Not paired" in out["badge"]["title"], out["badge"]
 
 
+ENGINE_LABEL_WIRING = """
+import { pathToFileURL } from "node:url";
+const dir = process.argv[2];
+const body = process.argv[3] === "with-engine"
+  ? { ok: true, recording: false, engine: "cloud" }
+  : { ok: true, recording: false };
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "abc123" }), set: async () => {} } },
+};
+globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => body });
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+console.log(JSON.stringify(await client.dictate()));
+"""
+
+
+def _engine_label(tmp_path: Path, mode: str) -> dict:
+    script = tmp_path / "engine_label.mjs"
+    script.write_text(ENGINE_LABEL_WIRING, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT), mode], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    return json.loads(run.stdout)
+
+
+def test_the_popup_names_the_engine_the_app_actually_used(tmp_path):
+    """Local and cloud differ in privacy and in who is paid, so the popup must not stay silent.
+
+    Executed against the shipped client.js with a stubbed bridge reply: the label comes from the
+    app's own answer, and nothing is invented when the app does not name one.
+    """
+    named = _engine_label(tmp_path, "with-engine")
+    assert named["ok"] is True
+    assert named["engine"] == " (cloud)"
+    assert "cloud" in named["message"], named["message"]
+
+    silent = _engine_label(tmp_path, "no-engine")
+    assert silent["engine"] == "", "no label is invented when the app sends none"
+    assert "(" not in silent["message"], silent["message"]
+
+
 def test_the_popup_dictate_button_routes_through_the_shared_client_call():
     """The popup must import the one dictation function, not POST to the bridge itself. Its own
     fetch would need its own token handling and could disagree with the hotkey's."""

@@ -86,10 +86,13 @@ export async function dictate() {
   }
   const body = await readJson(response);
   if (response.ok && body.ok) {
+    // The engine name comes from the app, so the popup can say which one ran without guessing.
+    const engine = typeof body.engine === "string" && body.engine ? ` (${body.engine})` : "";
     return {
       ok: true,
       recording: Boolean(body.recording),
-      message: body.recording ? "Listening in Listen. Press again to stop." : "Stopped; transcribing.",
+      engine,
+      message: body.recording ? "Listening in Listen. Press again to stop." : `Stopped; transcribing${engine}.`,
     };
   }
   if (response.status === 401) {

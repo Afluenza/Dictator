@@ -7,6 +7,7 @@ Local text-to-speech reader with a notes window. MIT licence, no accounts, no se
 - **Summarize to Notes:** key points from the loaded text, added to a new note or an existing one. Local and offline.
 - **Social and web links:** any pasted link is read through free anonymous routes only. Login-only platforms (Reddit, X, Instagram, ...) are refused rather than scraped.
 - **Browser extension:** send the page, post, comment, or just your selection straight into the app from Chrome or Edge. No copy-paste, no account.
+- **Dictation:** put the cursor in any text field and speak — `Alt+Shift+D` from the browser, `Cmd/Ctrl+Shift+D` in the Listen window. The transcript is pasted where the cursor is. Local by default (faster-whisper `small.en`); cloud transcription is opt-in.
 
 ## Setup
 
@@ -21,6 +22,14 @@ Local text-to-speech reader with a notes window. MIT licence, no accounts, no se
 Tests: `python -m pytest -q`. Tests that need the Kokoro model skip when it is missing.
 
 Notes are saved to `~/.listen-app/notes.json` (override with `LISTEN_APP_NOTES`).
+
+## Dictation
+
+Local by default: the app transcribes on this machine with faster-whisper `small.en`, and no audio leaves it. To have it, put a faster-whisper model directory at `~/listen-app/models/whisper-small.en` (or point `LISTEN_APP_MODEL_DIR` at the folder that contains it).
+
+For cloud transcription, press **Dictation** in the title bar (or the same window's button), choose **In the cloud**, and paste your own API key. The default address is OpenAI's `/v1/audio/transcriptions`; any OpenAI-compatible endpoint works, and it must be `https` unless it is on this machine. The key is stored in the OS keychain when `keyring` is installed (`pip install 'listen-app[keychain]'`), otherwise in `~/.listen-app/stt-key` with owner-only permissions. It is never written to the settings file, never shown back in the window, and never sent to the browser extension — the extension only ever receives the engine's name.
+
+The setting (`~/.listen-app/dictate.json`) has three values: **Automatic** (the local model when installed, else cloud when a key is saved), **On this Mac**, and **In the cloud**. Choosing one is honoured even when the other is available: nothing silently switches engines behind you, and an engine that is not set up reports what is missing instead of falling back.
 
 ## Browser extension
 

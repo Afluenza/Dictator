@@ -61,10 +61,12 @@ class ListenApp(ctk.CTk):
         self._last_ahead: RenderAhead | None = None  # finished render, kept so Restart replays without rendering
         self._popup: ctk.CTkToplevel | None = None
         self._notes = None  # the Notes window, created on first use
+        self._dictation_window = None  # the Dictation settings window, created on first use
         self._bridge = None  # the loopback listener the browser extension posts to
         self._bridge_error = ""
         self._dictation = None  # the mic session, created on first use
         self._paste = True  # paste a dictation into the focused field; the app never pastes on its own
+        self._dictation_engine = ""  # "local" | "cloud", set when the engine is actually built
 
         self._build()
         threading.Thread(target=self._load_engine, args=(engine_factory,), daemon=True).start()
@@ -99,6 +101,12 @@ class ListenApp(ctk.CTk):
             text_color=theme.INK, corner_radius=theme.RADIUS, height=32, font=theme.font(theme.SIZE_BODY),
         )
         self.browser_button.pack(side="right", padx=4, pady=6)
+        self.dictation_button = ctk.CTkButton(
+            header, text="Dictation", width=112, image=theme.icon("mic", size=14, color=theme.INK),
+            command=self._on_dictation_settings, fg_color=theme.CHROME_HOVER, hover_color=theme.CHROME,
+            text_color=theme.INK, corner_radius=theme.RADIUS, height=32, font=theme.font(theme.SIZE_BODY),
+        )
+        self.dictation_button.pack(side="right", padx=4, pady=6)
 
         inputs = ctk.CTkFrame(self, **theme.surface())
         inputs.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -188,7 +196,8 @@ class ListenApp(ctk.CTk):
         from listen_app.bridge import Bridge
 
         bridge = Bridge(lambda payload: self._events.put(("bridged", payload)),
-                        on_dictate=self._dictate_toggle)
+                        on_dictate=self._dictate_toggle,
+                        engine_label=self._dictation_engine_name)
         if not bridge.start():
             self._bridge_error = bridge.error
             self.status.configure(text=f"Browser bridge off: {bridge.error}")
@@ -404,6 +413,17 @@ class ListenApp(ctk.CTk):
             )
         return self._dictation
 
+    def _dictation_engine_name(self) -> str:
+        """Which engine built the last transcript, for the popup and the status line. Never a key.
+
+        Called from the bridge's request thread, so it only reads an attribute and never builds
+        a session: opening a microphone because a browser asked a question would be wrong.
+        """
+        # __dict__, not getattr: a Tk widget's __getattr__ delegates to self.tk and recurses forever
+        # on a name the widget does not have, which is exactly the case before the first dictation.
+        session = self.__dict__.get("_dictation")
+        return session.engine_name if session is not None else ""
+
     def _dictate_toggle(self) -> bool:
         """Start or stop listening. Safe to call from a request thread: only the queue is touched.
 
@@ -451,8 +471,12 @@ class ListenApp(ctk.CTk):
             return
         self._set_text(text)
         self._loaded_source = ""  # it is speech, not a page: nothing to attribute
+        # Which engine produced this transcript belongs in the status line: local and cloud
+        # differ in privacy and in who was paid for the call, so the user must not have to guess.
+        engine = self._dictation_engine_name()
+        by = f" ({engine})" if engine and engine != "unknown" else ""
         if not self._paste:
-            self.status.configure(text="Dictated into the box.")
+            self.status.configure(text=f"Dictated into the box{by}.")
             return
         from listen_app.paste import PasteError, paste_text
 
@@ -460,9 +484,9 @@ class ListenApp(ctk.CTk):
             paste_text(text)
         except PasteError as exc:
             # The text is in the box either way, so this is a partial success and says so.
-            self.status.configure(text=f"Dictated into the box; could not paste at the cursor: {exc}")
+            self.status.configure(text=f"Dictated into the box{by}; could not paste at the cursor: {exc}")
             return
-        self.status.configure(text="Dictated and pasted at the cursor.")
+        self.status.configure(text=f"Dictated and pasted at the cursor{by}.")
 
     def _on_summarize(self) -> None:
         """Summarise the loaded text into key points, then let the user add them to a note.
@@ -483,6 +507,27 @@ class ListenApp(ctk.CTk):
         self._on_notes()
         self._notes.offer_summary(markup)
         self.status.configure(text="Key points ready. Choose a note in the Notes window.")
+
+    def _on_dictation_settings(self) -> None:
+        """Open the Dictation window once; a second press lifts the existing one."""
+        from listen_app.dictation_gui import DictationWindow
+
+        if self._dictation_window is None or not self._dictation_window.winfo_exists():
+            self._dictation_window = DictationWindow(self, on_changed=self._dictation_changed)
+        else:
+            self._dictation_window.lift()
+
+    def _dictation_changed(self) -> None:
+        """A setting changed: drop the cached engine so the next dictation uses the new choice."""
+        if self._dictation is not None:
+            self._dictation.reset()
+        self.status.configure(text=f"Dictation: {self._dictation_label()}.")
+
+    def _dictation_label(self) -> str:
+        """What dictation will use, in one plain phrase with no key in it."""
+        from listen_app import dictate
+
+        return dictate.describe()
 
     def _on_notes(self) -> None:
         """Open the notes window once; a second press lifts the existing one."""

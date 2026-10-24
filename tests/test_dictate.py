@@ -100,12 +100,29 @@ def test_engine_refuses_a_wrong_sample_rate():
     assert "16000" in str(excinfo.value)
 
 
-# ----- the engine factory stays local by default ----------------------------
-def test_factory_uses_the_local_model_when_it_exists(tmp_path, monkeypatch):
-    """The routing decision: a model on disk wins over a configured cloud key.
+# ----- the engine factory: local by default, cloud only when chosen ---------
+@pytest.fixture
+def config(tmp_path, monkeypatch):
+    """An empty config dir and no keychain, so no test can read the real saved key or setting.
 
-    faster_whisper is replaced with a stub so the test proves the choice, not the model's bytes.
+    Without this, the suite on a machine with dictation configured would pick up the user's own
+    cloud key and start posting audio to a live endpoint from a test.
     """
+    for var in ("LISTEN_APP_STT_URL", "LISTEN_APP_STT_KEY", "LISTEN_APP_MODEL_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("LISTEN_APP_DICTATE_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(dictate, "_keyring", lambda: None)
+    return tmp_path / "cfg"
+
+
+def write_model(base: Path) -> None:
+    """A model directory the factory treats as installed, without loading anything."""
+    (base / dictate.DEFAULT_MODEL_DIR).mkdir(parents=True, exist_ok=True)
+    (base / dictate.DEFAULT_MODEL_DIR / "model.bin").write_bytes(b"stub")
+
+
+def stub_whisper(monkeypatch) -> None:
+    """Replace the model class so a test proves the routing choice, not the model's bytes."""
     import faster_whisper
 
     class StubModel:
@@ -113,29 +130,106 @@ def test_factory_uses_the_local_model_when_it_exists(tmp_path, monkeypatch):
             self.path = str(path)
 
     monkeypatch.setattr(faster_whisper, "WhisperModel", StubModel)
-    (tmp_path / dictate.DEFAULT_MODEL_DIR).mkdir(parents=True)
-    (tmp_path / dictate.DEFAULT_MODEL_DIR / "model.bin").write_bytes(b"stub")
+
+
+def test_factory_uses_the_local_model_when_it_exists(config, monkeypatch):
+    """Auto keeps the original behaviour: a model on disk wins over a configured cloud key."""
+    stub_whisper(monkeypatch)
+    write_model(config.parent)
     monkeypatch.setenv("LISTEN_APP_STT_URL", "https://example.invalid/v1/audio/transcriptions")
     monkeypatch.setenv("LISTEN_APP_STT_KEY", "not-a-real-key")
-    engine = make_engine(tmp_path)
+    engine = make_engine(config.parent)
     assert isinstance(engine, WhisperEngine)
     assert engine._model.path.endswith(dictate.DEFAULT_MODEL_DIR)
 
 
-def test_factory_refuses_cloud_unless_both_url_and_key_are_set(tmp_path, monkeypatch):
-    for var in ("LISTEN_APP_STT_URL", "LISTEN_APP_STT_KEY"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("LISTEN_APP_STT_URL", "https://example.invalid/v1/audio/transcriptions")
+def test_factory_refuses_cloud_unless_a_key_is_saved(config):
+    """An address without a key must not quietly go cloud."""
+    dictate.save_settings(cloud_url="https://example.invalid/v1/audio/transcriptions")
     with pytest.raises(EngineMissing) as excinfo:
-        make_engine(tmp_path)  # url without a key must not silently go cloud
-    assert "LISTEN_APP_STT_KEY" in str(excinfo.value)
+        make_engine(config.parent)
+    assert "key" in str(excinfo.value)
 
 
-def test_factory_goes_cloud_only_when_deliberately_configured(tmp_path, monkeypatch):
+def test_factory_goes_cloud_only_when_deliberately_configured(config, monkeypatch):
     monkeypatch.setenv("LISTEN_APP_STT_URL", "https://example.invalid/v1/audio/transcriptions")
     monkeypatch.setenv("LISTEN_APP_STT_KEY", "not-a-real-key")
-    engine = make_engine(tmp_path)
+    engine = make_engine(config.parent)
     assert isinstance(engine, CloudEngine)
+
+
+def test_the_saved_cloud_choice_beats_a_local_model(config, monkeypatch):
+    """The gap the card named: cloud was unreachable whenever a model was on disk.
+
+    A user who chooses cloud is sending audio on purpose; falling back to local would hide that
+    choice, and falling back to local silently would be worse than the error.
+    """
+    stub_whisper(monkeypatch)
+    write_model(config.parent)
+    dictate.save_key("sk-test-key")
+    dictate.save_settings(engine="cloud", cloud_url="https://example.invalid/v1/audio/transcriptions")
+    engine = make_engine(config.parent)
+    assert isinstance(engine, CloudEngine), "the saved choice decides, not the disk"
+    assert engine.url == "https://example.invalid/v1/audio/transcriptions"
+
+
+def test_the_saved_local_choice_beats_a_saved_key(config, monkeypatch):
+    stub_whisper(monkeypatch)
+    write_model(config.parent)
+    dictate.save_key("sk-test-key")
+    dictate.save_settings(engine="local")
+    engine = make_engine(config.parent)
+    assert isinstance(engine, WhisperEngine)
+
+
+def test_choosing_local_without_a_model_says_so_instead_of_going_cloud(config):
+    """No silent substitution in either direction: the error names the fix."""
+    dictate.save_key("sk-test-key")
+    dictate.save_settings(engine="local")
+    with pytest.raises(EngineMissing) as excinfo:
+        make_engine(config.parent)
+    assert "No local transcription model" in str(excinfo.value)
+
+
+def test_an_unknown_saved_engine_falls_back_to_auto(config):
+    """A hand-edited or corrupted setting must not wedge dictation."""
+    (config).mkdir(parents=True, exist_ok=True)
+    (config / "dictate.json").write_text('{"engine": "telepathy"}', encoding="utf-8")
+    assert dictate.load_settings()["engine"] == "auto"
+
+
+def test_the_settings_file_never_contains_the_key(config):
+    """The key belongs in the keychain (or the 0600 key file), never in the settings file."""
+    dictate.save_key("sk-very-secret-value")
+    dictate.save_settings(engine="cloud", cloud_url="https://example.invalid/v1/audio/transcriptions")
+    settings = dictate.settings_path().read_text(encoding="utf-8")
+    assert "audio/transcriptions" in settings
+    assert "sk-very-secret-value" not in settings, settings
+
+
+def test_a_saved_key_is_readable_and_removable(config):
+    assert dictate.save_key("sk-round-trip") in {"keychain", "file"}
+    assert dictate.load_key() == "sk-round-trip"
+    assert dictate.has_key() is True
+    dictate.clear_key()
+    assert dictate.load_key() == ""
+
+
+def test_the_key_file_is_owner_only(config):
+    """With no keychain, the fallback file must not be world-readable."""
+    assert dictate.save_key("sk-owner-only") == "file"
+    mode = dictate.key_file().stat().st_mode & 0o777
+    assert mode == 0o600, oct(mode)
+
+
+def test_cloud_needs_https_except_on_this_machine(config):
+    """Audio and a bearer key must not cross plain http to another host."""
+    for bad in ("http://example.com/v1/asr", "ftp://example.com/v1/asr", "example.com/v1/asr"):
+        with pytest.raises(DictateError):
+            dictate.check_cloud_url(bad)
+    assert dictate.check_cloud_url("http://127.0.0.1:8765/v1/asr") == "http://127.0.0.1:8765/v1/asr"
+    assert dictate.check_cloud_url("http://localhost:8765/") == "http://localhost:8765/"
+    assert dictate.check_cloud_url("https://api.openai.com/v1/audio/transcriptions")
 
 
 def test_cloud_engine_reports_a_status_never_a_body(monkeypatch):
@@ -156,6 +250,162 @@ def test_cloud_engine_reports_a_status_never_a_body(monkeypatch):
         engine.transcribe(speech())
     assert "401" in str(excinfo.value)
     assert "sk-secret-value" not in str(excinfo.value)
+
+
+# ----- the cloud request, against a real socket ----------------------------
+class StubEndpoint:
+    """A local HTTP server that behaves like an OpenAI-compatible transcription endpoint.
+
+    It is a real socket, so the multipart body and the Authorization header are what
+    requests actually sends, not what a mock was told to expect.
+    """
+
+    def __init__(self, status: int = 200, payload: bytes = b'{"text": "hello from the cloud"}',
+                 delay: float = 0.0) -> None:
+        import http.server
+        import threading
+
+        self.status = status
+        self.payload = payload
+        self.delay = delay
+        self.requests: list[dict] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - the base class names it
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                outer.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
+                if outer.delay:
+                    import time as _time
+
+                    _time.sleep(outer.delay)
+                self.send_response(outer.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(outer.payload)))
+                self.end_headers()
+                self.wfile.write(outer.payload)
+
+            def log_message(self, *_args):  # silence: a test run should not print request lines
+                pass
+
+        class Server(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                pass  # a client that timed out mid-reply is the point of one of these tests
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exc):
+        self.server.shutdown()
+        self.server.server_close()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/v1/audio/transcriptions"
+
+
+def test_the_cloud_request_carries_a_bearer_key_and_a_wav_file(config):
+    with StubEndpoint() as stub:
+        engine = CloudEngine(stub.url, "sk-live-key")
+        assert engine.transcribe(speech()) == "hello from the cloud"
+
+    sent = stub.requests[0]
+    assert sent["path"] == "/v1/audio/transcriptions"
+    assert sent["headers"]["Authorization"] == "Bearer sk-live-key"
+    assert "multipart/form-data" in sent["headers"]["Content-Type"]
+    body = sent["body"]
+    assert b'name="model"' in body and b"whisper-1" in body
+    assert b'filename="dictation.wav"' in body
+    assert b"RIFF" in body, "the payload is a real WAV file, not raw samples"
+    assert b'name="file"' in body
+
+
+def test_a_non_200_is_a_dictate_error_carrying_no_key(config):
+    with StubEndpoint(status=429, payload=b'{"error": "slow down sk-live-key"}') as stub:
+        engine = CloudEngine(stub.url, "sk-live-key")
+        with pytest.raises(DictateError) as excinfo:
+            engine.transcribe(speech())
+    assert "429" in str(excinfo.value)
+    assert "sk-live-key" not in str(excinfo.value)
+
+
+def test_a_dead_endpoint_is_a_dictate_error_not_a_hang(config):
+    """Connection refused must be reported, and fast: no retry loop, no 60 s wait."""
+    import socket
+    import time
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # nothing is listening on it now
+    engine = CloudEngine(f"http://127.0.0.1:{port}/v1/audio/transcriptions", "sk-live-key", timeout=5)
+    started = time.monotonic()
+    with pytest.raises(DictateError) as excinfo:
+        engine.transcribe(speech())
+    assert time.monotonic() - started < 5
+    assert "sk-live-key" not in str(excinfo.value)
+
+
+def test_a_slow_endpoint_hits_its_timeout(config):
+    with StubEndpoint(delay=2.0) as stub:
+        engine = CloudEngine(stub.url, "sk-live-key", timeout=0.4)
+        with pytest.raises(DictateError) as excinfo:
+            engine.transcribe(speech())
+    assert "Timeout" in str(excinfo.value) or "ReadTimeout" in str(excinfo.value)
+
+
+def test_a_reply_that_is_not_json_is_reported_plainly(config):
+    with StubEndpoint(payload=b"<html>gateway error</html>") as stub:
+        engine = CloudEngine(stub.url, "sk-live-key")
+        with pytest.raises(DictateError) as excinfo:
+            engine.transcribe(speech())
+    assert "not JSON" in str(excinfo.value)
+
+
+def test_cloud_refuses_a_plain_http_address_that_is_not_local(config):
+    with pytest.raises(DictateError):
+        CloudEngine("http://example.com/v1/asr", "sk-live-key")
+
+
+def test_concurrent_cloud_dictations_stay_separate(config):
+    """Eight dictations at once: one WAV per request, all answered, no shared buffer."""
+    with StubEndpoint() as stub:
+        engine = CloudEngine(stub.url, "sk-live-key")
+        results: list[str] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(8)
+
+        def one():
+            try:
+                barrier.wait(timeout=10)
+                results.append(engine.transcribe(speech()))
+            except BaseException as exc:  # noqa: BLE001 - collected, then asserted
+                errors.append(exc)
+
+        threads = [threading.Thread(target=one) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+
+    assert errors == []
+    assert results == ["hello from the cloud"] * 8
+    assert len(stub.requests) == 8
+    assert all(request["body"].count(b"RIFF") == 1 for request in stub.requests), "one WAV per request"
+
+
+def test_a_300_second_dictation_is_accepted_and_beyond_it_is_refused(config):
+    """The ceiling is the same for both engines: bounded before any bytes are encoded."""
+    at_limit = np.zeros(int(dictate.MAX_SECONDS * dictate.SAMPLE_RATE), dtype=np.float32)
+    assert too_long(at_limit) is False
+    assert too_long(np.zeros(at_limit.size + 1, dtype=np.float32)) is True
 
 
 # ----- guards ---------------------------------------------------------------
@@ -349,6 +599,39 @@ def test_the_callers_message_is_the_last_word_in_the_status_line():
     assert texts == [SPOKEN]
     assert statuses[-1] == "caller's own message", statuses
     assert "Dictated." not in statuses, "the session must not speak over the caller"
+
+
+def test_the_session_reports_which_engine_actually_ran():
+    """The window and the popup both show this label, so it must come from the built engine.
+
+    It is "" before any engine exists: a window that has not dictated yet must not claim one.
+    """
+    session = Session(engine_factory=lambda: CloudEngine("https://example.invalid/v1/asr", "sk-x"),
+                      on_text=lambda _t: None, on_status=lambda _s: None)
+    assert session.engine_name == "", "no engine has been built yet"
+
+    done = threading.Event()
+    session._finish(np.zeros(dictate.SAMPLE_RATE, dtype=np.float32), lambda _t: done.set())
+    assert done.wait(5)
+    assert session.engine_name == "cloud"
+
+
+def test_a_changed_setting_is_picked_up_after_reset():
+    """Choosing another engine must not keep dictating with the old one until the app restarts."""
+    built: list[str] = []
+
+    def factory():
+        built.append(str(len(built)))
+        return StubEngine(SPOKEN)
+
+    session = Session(engine_factory=factory, on_text=lambda _t: None)
+    session._get_engine()
+    session._get_engine()
+    assert len(built) == 1, "the engine is built once and reused"
+
+    session.reset()
+    session._get_engine()
+    assert len(built) == 2, "reset drops the cached engine so the new setting takes effect"
 
 
 def test_overlapping_finishes_load_the_engine_once():

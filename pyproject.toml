@@ -29,10 +29,16 @@ dependencies = [
     # Speech-to-text, local by default. MIT (faster-whisper, ctranslate2) with av (LGPL-3.0)
     # arriving as a wheel-bundled library; no GPL module is imported by this project.
     "faster-whisper==1.2.1",
+    # The opt-in cloud path POSTs the WAV itself. Already installed via spacy, declared here
+    # because this project now imports it directly.
+    "requests==2.34.2",
 ]
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1"]
+# `pip install 'listen-app[keychain]'` puts the cloud API key in the OS keychain; without it
+# the key goes to a 0600 file. Nothing in the app requires keyring.
+keychain = ["keyring==25.6.0"]
 
 [tool.setuptools]
 # Pin discovery: the repo root also holds rea/, extension/ and tests/, which setuptools
