@@ -1000,7 +1000,11 @@ page.world = {
           ? [{ innerText: "A top comment.", getBoundingClientRect: () => ({ width: 9, height: 9 }) }]
           : [];
       }
-      if (sel.includes("ytd-comments") || sel.includes("#comments")) return [{}];
+      // A laid-out container, the way a real watch page has one. A page that only carries the
+      // 0x0 stub is a different test (see the browse-page test below).
+      if (sel.includes("ytd-comments") || sel.includes("#comments")) {
+        return [{ getBoundingClientRect: () => ({ width: 800, height: 500 }) }];
+      }
       if (sel.includes("script")) {
         return [{ textContent: '{"shortDescription":"The description of the video."}' }];
       }
@@ -1182,6 +1186,26 @@ def test_the_desktop_page_still_asks_for_a_scroll_not_a_tap(tmp_path):
     }, tmp_path)
     assert result["revealComments"] is True
     assert result["revealMode"] == "scroll", result.get("revealMode")
+
+
+def test_a_youtube_page_that_is_not_a_watch_page_never_asks_for_a_reveal(tmp_path):
+    """Regression, measured live 2026-10-24 on the home page, search results and history.
+
+    Every non-watch YouTube page carries a 0x0 ytd-comments stub inside #below. Counting matches
+    meant the popup scrolled the tab (4517 px on the home page), waited, and sent a second read
+    that returned different text — 2417 characters on the pass the reader saw against 4485 after
+    the scroll. A laid-out container is the watch-page signal; a stub is not.
+    """
+    result = extract({
+        "url": "https://www.youtube.com/feed/history", "host": "www.youtube.com",
+        "body": {"children": [
+            {"tag": "ytd-comments", "hidden": True, "text": ""},
+            {"tag": "main", "children": [para("A list of videos you watched, longest first. " * 20)]},
+        ]},
+    }, tmp_path)
+    assert result["revealComments"] is False, "a browse page must not be scrolled for comments"
+    assert result["revealMode"] == ""
+    assert result["scrollY"] is None
 
 
 def test_a_mobile_page_that_already_has_comments_asks_for_nothing(tmp_path):

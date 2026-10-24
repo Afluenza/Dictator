@@ -389,9 +389,23 @@ function dictatorExtract(options) {
   // document is the hidden engagement-panel one inside #panels (0 px tall, at the top), so
   // scrolling to it does nothing at all. Measured live 2026-10-20 at 720x588.
   const YT_COMMENTS = "#below #comments, #below ytd-comments, ytd-comments";
+  // A stub container is not a watch page. Every other YouTube page (home, search results, a
+  // channel, history) carries a 0x0 ytd-comments placeholder inside #below, so counting matches
+  // asked for a reveal there too: measured live 2026-10-24, the popup scrolled the tab 4517 px,
+  // waited, and sent a second read that differed from the first (2417 characters on the pass the
+  // reader saw, 4485 after the scroll — different text, so the note held whatever the browse page
+  // lazily loaded instead of what was on screen). A real comments section has a box; a stub does
+  // not, so a laid-out container is the signal.
+  function hasCommentsContainer() {
+    const boxes = document.querySelectorAll(YT_COMMENTS);
+    for (const box of boxes) {
+      if (visible(box)) return true;
+    }
+    return false;
+  }
   function needsCommentReveal() {
     if (!hostMatches(host, "youtube.com")) return false;
-    if (!document.querySelectorAll(YT_COMMENTS).length) return false;
+    if (!hasCommentsContainer()) return false;
     return document.querySelectorAll("ytd-comment-thread-renderer").length === 0;
   }
 
@@ -405,7 +419,7 @@ function dictatorExtract(options) {
   function needsMobileCommentTap() {
     if (!hostMatches(host, "youtube.com")) return false;
     // Desktop already has #below's comments container; the teaser is the mobile-only signal.
-    if (document.querySelectorAll(YT_COMMENTS).length) return false;
+    if (hasCommentsContainer()) return false;
     if (document.querySelectorAll("ytm-comment-renderer").length) return false;
     return document.querySelectorAll(YT_MOBILE_TEASER).length > 0;
   }
