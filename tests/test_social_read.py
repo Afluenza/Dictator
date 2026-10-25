@@ -6,6 +6,7 @@ error body, the YouTube oEmbed JSON, the GitHub repo, readme and issue payloads,
 and hot list, and a real RSS feed.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -141,7 +142,7 @@ def test_youtube_with_title_but_no_transcript_is_a_stub_not_a_post(monkeypatch):
     import listen_app.social_read as sr
 
     monkeypatch.setattr(sr, "_youtube_transcript",
-                        lambda url: ("", "no English transcript on this video"))
+                        lambda url, transport=None: ("", "no English transcript on this video"))
     transport = serves({
         "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
         "https://www.youtube.com/watch?v=": (200, "text/html", b"<html></html>"),
@@ -217,7 +218,7 @@ def test_youtube_with_a_transcript_is_read_in_full(monkeypatch):
     import listen_app.social_read as sr
 
     monkeypatch.setattr(sr, "_youtube_transcript",
-                        lambda url: ("So never gonna give you up, never gonna let you down. " * 4, ""))
+                        lambda url, transport=None: ("So never gonna give you up, never gonna let you down. " * 4, ""))
     transport = serves({
         "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
         "https://www.youtube.com/watch?v=": (200, "text/html", b"<html></html>"),
@@ -241,6 +242,52 @@ def test_youtube_reads_the_description_from_the_public_watch_page():
     assert "Never Gonna Give You Up" in result.text
     assert "description from the watch page" in result.note
     assert result.url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"  # the URL the reader pasted
+
+
+def test_fixture_reads_never_open_a_socket_to_youtube(monkeypatch):
+    """Regression (R33): the caption library ignored the injected transport and reached YouTube live.
+
+    Every connect() is recorded and refused, so a fixture read that touches the network fails here
+    instead of depending on the machine's connection."""
+    import socket
+
+    attempts = []
+
+    def refuse(self, address, *args, **kwargs):
+        attempts.append(address)
+        raise OSError("fixture test attempted a live connection")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    transport = serves({
+        "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
+        "https://www.youtube.com/watch?v=": (200, "text/html", body_of("youtube_watch_page.html")),
+    })
+    assert read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=transport).state == OK
+    assert attempts == []
+
+
+def test_injected_transport_skips_the_caption_library(monkeypatch):
+    """With a transport injected, the transcript library is never constructed."""
+    import listen_app.social_read as sr
+
+    class MustNotRun:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("the caption library was reached through an injected transport")
+
+    monkeypatch.setattr(sr, "YouTubeTranscriptApi", MustNotRun)
+    text, note = sr._youtube_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ", serves({}))
+    assert text == ""
+    assert "injected transport" in note
+
+
+@pytest.mark.skipif(not os.environ.get("LISTEN_APP_LIVE_NETWORK"),
+                    reason="live YouTube check is opt-in: set LISTEN_APP_LIVE_NETWORK=1")
+def test_live_youtube_transcript_route_opt_in():
+    """Explicit live check. Not run by default and not run in CI: it reaches YouTube for real."""
+    import listen_app.social_read as sr
+
+    _text, note = sr._youtube_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    assert note == "" or note.startswith("transcript unavailable") or "transcript" in note
 
 
 def test_youtube_short_link_is_resolved_to_the_same_video():
