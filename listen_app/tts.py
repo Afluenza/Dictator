@@ -46,6 +46,39 @@ def clamp_speed(speed: float) -> float:
     return min(MAX_SPEED, max(MIN_SPEED, float(speed)))
 
 
+def voice_label(name: str, all_names: list[str] | tuple[str, ...] | None = None) -> str:
+    """The short name to show for a voice ID, so the menu reads "Heart" rather than "af_heart".
+
+    Kokoro IDs are `<lang><gender>_<name>`; only the name is kept, capitalised. A name shared by more
+    than one ID (Santa is af/am/em Santa, Dora is ef/pf Dora) would put two different voices behind one
+    label and could pick the wrong one, so a colliding ID keeps its prefix: "Em Santa". Pass `all_names`
+    when labelling a whole menu; with only the ID no collision can be known, so the plain name comes
+    back. Display only: every engine still takes the real ID for synthesis.
+    """
+    head, sep, tail = name.partition("_")
+    if not sep or not tail:
+        return name  # a `say` voice ("Samantha"), or an ID with no prefix: unchanged
+    short = tail.capitalize()
+    if all_names is None:
+        return short
+    if sum(1 for other in all_names if other.partition("_")[2].lower() == tail.lower()) > 1:
+        return f"{head.capitalize()} {short}"
+    return short
+
+
+def labelled_voices(names: list[str]) -> dict[str, str]:
+    """Map each engine voice ID to the label the menu shows, in the order the engine listed them."""
+    return {name: voice_label(name, names) for name in names}
+
+
+def voice_id_for(label: str, mapping: dict[str, str]) -> str:
+    """The engine voice ID a menu label stands for. "" when the label is not in the menu."""
+    for name, shown in mapping.items():
+        if shown == label:
+            return name
+    return ""
+
+
 def _wrap_piece(piece: str, limit: int = MAX_PIECE_CHARS) -> list[str]:
     """Break one over-long piece at word boundaries. Kokoro silently drops tokens past MAX_TOKENS."""
     pieces: list[str] = []
