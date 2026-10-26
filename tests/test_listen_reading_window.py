@@ -362,11 +362,18 @@ def test_restart_runs_the_real_playback_worker_without_error(window, monkeypatch
 
     The other Restart test stubs the worker out, which hid this. Here the real worker runs on a finished render.
     """
+    import sys
     import threading
+    import types
 
     import numpy as np
 
     from listen_app.playback import RenderAhead
+
+    # The worker imports sounddevice, which needs the PortAudio system library. The Linux CI runner has no PortAudio,
+    # so the module is replaced before the worker runs. No audio device is ever opened.
+    fake_sd = types.SimpleNamespace(play=lambda *a, **k: None, wait=lambda *a, **k: None, stop=lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
 
     class FakeEngine:
         sample_rate = 24000
@@ -386,12 +393,6 @@ def test_restart_runs_the_real_playback_worker_without_error(window, monkeypatch
         threading.Event().wait(0.01)
     window._last_ahead = finished
     window._engine = FakeEngine()
-
-    import sounddevice as sd
-
-    monkeypatch.setattr(sd, "play", lambda *a, **k: None)
-    monkeypatch.setattr(sd, "wait", lambda *a, **k: None)
-    monkeypatch.setattr(sd, "stop", lambda *a, **k: None)
 
     window._on_restart()
     assert done.wait(10), "the restarted playback never reported back"
