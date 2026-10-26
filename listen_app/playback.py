@@ -224,11 +224,13 @@ def play_buffered(
     on_start: Callable[[], None] | None = None,
     on_progress: Callable[[float, str], None] | None = None,
     gap_s: float = SENTENCE_GAP_S,
+    on_chunk: Callable[[int], None] | None = None,
 ) -> bool:
     """Play the rendered chunks in order, with a gap between them. Returns False if Stop came first.
 
     `play` runs under `lock`, the same lock Stop holds while it calls sd.stop(), so a Stop cannot
-    slip in between the cancel check and the start of playback.
+    slip in between the cancel check and the start of playback. `on_chunk(index)` runs as each
+    sentence begins, so the reading highlight can follow the speech.
     """
     if not ahead.wait_for_start(on_progress):
         return False
@@ -239,6 +241,7 @@ def play_buffered(
         chunk = ahead.chunk(index)
         if chunk is None:
             break
+        sentence = index
         index += 1
         if len(chunk) == 0:
             continue
@@ -251,6 +254,8 @@ def play_buffered(
                     ahead.mark_started()
                     if on_start is not None:
                         on_start()
+                if on_chunk is not None and piece is chunk:
+                    on_chunk(sentence)  # the sentence is about to be heard, so the highlight moves now
                 play(piece)
             wait()
             ahead.mark_played(len(piece))

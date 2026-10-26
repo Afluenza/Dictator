@@ -233,11 +233,30 @@ function closeCommentSheet() {
   return false;
 }
 
+/* A YouTube watch or short link. The page's own text is its description and comments, which are not the
+ * video's words, so the app fetches the full transcript from the link instead of reading the page. */
+function isYouTubeVideo(url) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "youtu.be") return parsed.pathname.length > 1;
+    if (!/(^|\.)youtube\.com$/.test(host)) return false;
+    return parsed.pathname === "/watch" ? parsed.searchParams.has("v") : /^\/(shorts|embed)\//.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
 /* Extract the page in the active tab and send it. "auto" prefers a selection, "page" ignores it. */
 export async function sendPage(mode = "auto") {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id || !/^https?:/i.test(tab.url || "")) {
     return { ok: false, message: "This tab is not a web page, so there is nothing to read." };
+  }
+  if (isYouTubeVideo(tab.url)) {
+    // The transcript is the video's content. Sending the link lets Listen fetch the full transcript.
+    return send({ kind: "url", url: tab.url, title: tab.title || "" }).then((sent) =>
+      sent.ok ? { ok: true, message: "Sent the video to Listen. It will fetch the full transcript." } : sent);
   }
   let results;
   try {

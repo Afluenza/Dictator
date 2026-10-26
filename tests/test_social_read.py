@@ -137,120 +137,18 @@ def test_web_page_prefers_a_direct_read_over_jina():
     assert calls == ["https://example.com/article"]  # Jina is not called once direct text came back
 
 
-def test_youtube_with_title_but_no_transcript_is_a_stub_not_a_post(monkeypatch):
-    """The skill defines `empty` as "no content, no subtitles, or a stub", so a lone headline is empty."""
-    import listen_app.social_read as sr
+@pytest.fixture
+def no_live_socket(monkeypatch):
+    """Any real connection from a fixture test fails here, instead of depending on the machine's network.
 
-    monkeypatch.setattr(sr, "_youtube_transcript",
-                        lambda url, transport=None: ("", "no English transcript on this video"))
-    transport = serves({
-        "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
-        "https://www.youtube.com/watch?v=": (200, "text/html", b"<html></html>"),
-        "https://r.jina.ai/": (403, "application/json", body_of("jina_blocked.json")),
-    })
-    result = read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=transport)
-    assert result.state == EMPTY
-    assert result.title.startswith("Rick Astley")
-    assert result.text == ""  # a headline is never handed out as the post
-    assert "no English transcript" in result.note  # no captions, so no transcript is claimed
-    assert "no body text" in result.failure_message()
-
-
-def test_youtube_transcript_comes_from_the_api_without_yt_dlp(monkeypatch):
-    """Round 15: youtube-transcript-api replaces the yt-dlp branch, which was never installed here."""
-    import listen_app.social_read as sr
-
-    class Snippet:
-        def __init__(self, text):
-            self.text = text
-
-    class Fetched:
-        snippets = [Snippet("never gonna give you up"), Snippet("never gonna let you down")]
-
-    calls = []
-
-    class FakeApi:
-        def fetch(self, video_id, languages):
-            calls.append((video_id, tuple(languages)))
-            return Fetched()
-
-    monkeypatch.setattr(sr, "YouTubeTranscriptApi", FakeApi)
-    text, note = sr._youtube_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-    assert text == "never gonna give you up never gonna let you down"
-    assert note == ""
-    assert calls == [("dQw4w9WgXcQ", ("en",))]
-
-
-def test_youtube_transcript_missing_is_an_honest_note(monkeypatch):
-    import listen_app.social_read as sr
-
-    class FakeApi:
-        def fetch(self, video_id, languages):
-            raise sr.NoTranscriptFound(video_id, languages, None)
-
-    monkeypatch.setattr(sr, "YouTubeTranscriptApi", FakeApi)
-    text, note = sr._youtube_transcript("https://www.youtube.com/watch?v=9bZkp7q19f0")
-    assert text == ""
-    assert "no English transcript" in note
-
-
-def test_transcript_block_starts_a_cooldown_so_we_stop_hammering_youtube(monkeypatch):
-    """After IpBlocked, further transcript calls are skipped for a while, so the block does not deepen."""
-    import listen_app.social_read as sr
-
-    attempts = []
-
-    class Blocked:
-        def fetch(self, video_id, languages):
-            attempts.append(video_id)
-            raise sr.IpBlocked(video_id)
-
-    monkeypatch.setattr(sr, "YouTubeTranscriptApi", Blocked)
-    monkeypatch.setattr(sr, "_transcript_blocked_until", 0.0)
-    _text, first = sr._youtube_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-    _text, second = sr._youtube_transcript("https://www.youtube.com/watch?v=M7lc1UVf-VE")
-    assert attempts == ["dQw4w9WgXcQ"]  # the second video was not sent to YouTube at all
-    assert "cooling down" in second
-    assert "IpBlocked" in first
-
-
-def test_youtube_with_a_transcript_is_read_in_full(monkeypatch):
-    import listen_app.social_read as sr
-
-    monkeypatch.setattr(sr, "_youtube_transcript",
-                        lambda url, transport=None: ("So never gonna give you up, never gonna let you down. " * 4, ""))
-    transport = serves({
-        "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
-        "https://www.youtube.com/watch?v=": (200, "text/html", b"<html></html>"),
-        "https://r.jina.ai/": (403, "application/json", body_of("jina_blocked.json")),
-    })
-    result = read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=transport)
-    assert result.state == OK
-    assert "never gonna give you up" in result.text
-    assert result.route == "YouTube oEmbed"
-
-
-def test_youtube_reads_the_description_from_the_public_watch_page():
-    """The one route that gives a YouTube video a real body anonymously, with no account and no yt-dlp."""
-    transport = serves({
-        "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
-        "https://www.youtube.com/watch?v=": (200, "text/html", body_of("youtube_watch_page.html")),
-    })
-    result = read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=transport)
-    assert result.state == OK
-    assert "rickastleynever" not in result.text  # promo URLs are dropped, the prose is kept
-    assert "Never Gonna Give You Up" in result.text
-    assert "description from the watch page" in result.note
-    assert result.url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"  # the URL the reader pasted
-
-
-def test_fixture_reads_never_open_a_socket_to_youtube(monkeypatch):
-    """Regression (R33): the caption library ignored the injected transport and reached YouTube live.
-
-    Every connect() is recorded and refused, so a fixture read that touches the network fails here
-    instead of depending on the machine's connection."""
+    The IP-block cooldown is module state, so it is cleared too: a block recorded by one test must not
+    make the next fixture read report "cooling down" instead of the transcript it was given.
+    """
     import socket
 
+    import listen_app.transcript as tr
+
+    tr.reset_cooldown()
     attempts = []
 
     def refuse(self, address, *args, **kwargs):
@@ -258,44 +156,104 @@ def test_fixture_reads_never_open_a_socket_to_youtube(monkeypatch):
         raise OSError("fixture test attempted a live connection")
 
     monkeypatch.setattr(socket.socket, "connect", refuse)
-    transport = serves({
+    yield attempts
+    tr.reset_cooldown()
+    assert attempts == [], "a fixture test reached the network"
+
+
+def _youtube_transport(**extra):
+    mapping = {
         "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
         "https://www.youtube.com/watch?v=": (200, "text/html", body_of("youtube_watch_page.html")),
-    })
-    assert read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=transport).state == OK
-    assert attempts == []
+        "https://r.jina.ai/": (403, "application/json", body_of("jina_blocked.json")),
+    }
+    mapping.update(extra)
+    return serves(mapping)
 
 
-def test_injected_transport_skips_the_caption_library(monkeypatch):
-    """With a transport injected, the transcript library is never constructed."""
-    import listen_app.social_read as sr
+class _Track:
+    def __init__(self, language, generated, *lines):
+        self.language, self.generated, self.snippets = language, generated, list(lines)
 
-    class MustNotRun:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("the caption library was reached through an injected transport")
 
-    monkeypatch.setattr(sr, "YouTubeTranscriptApi", MustNotRun)
-    text, note = sr._youtube_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ", serves({}))
-    assert text == ""
-    assert "injected transport" in note
+class _Source:
+    def __init__(self, tracks):
+        self._tracks = tracks
+
+    def tracks(self, video_id):
+        return self._tracks
+
+
+def _use_captions(monkeypatch, tracks):
+    import listen_app.transcript as tr
+
+    monkeypatch.setattr(tr, "YouTubeCaptions", lambda: _Source(tracks))
+
+
+def test_youtube_without_a_transcript_is_an_honest_empty_state_not_the_description(monkeypatch, no_live_socket):
+    """The description is never presented as the video's content. With no transcript, the read says so."""
+    _use_captions(monkeypatch, [])
+    result = read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=_youtube_transport())
+    assert result.state == EMPTY
+    assert result.text == ""
+    assert "Never Gonna Give You Up" not in result.text
+    assert "no caption tracks" in result.note
+    assert result.meta["transcript_state"] == "unavailable"
+
+
+def test_youtube_full_transcript_is_the_content_with_title_and_metadata(monkeypatch, no_live_socket):
+    _use_captions(monkeypatch, [_Track("en", False, "Never gonna give you up.", "Never gonna let you down.")])
+    result = read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=_youtube_transport())
+    assert result.state == OK
+    assert "Never gonna give you up. Never gonna let you down." in result.text
+    assert result.meta["transcript_language"] == "en"
+    assert result.meta["transcript_generated"] is False
+    assert result.url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+def test_youtube_fallback_language_is_disclosed_in_the_result(monkeypatch, no_live_socket):
+    _use_captions(monkeypatch, [_Track("ja", True, "こんにちは")])
+    result = read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=_youtube_transport())
+    assert result.state == OK
+    assert result.meta["transcript_fallback"] is True
+    assert "fallback" in result.note
+
+
+def test_youtube_retrieval_failure_is_blocked_not_empty(monkeypatch, no_live_socket):
+    import listen_app.transcript as tr
+
+    class Blocked:
+        def tracks(self, video_id):
+            raise type("IpBlocked", (Exception,), {})("blocked")
+
+    monkeypatch.setattr(tr, "YouTubeCaptions", Blocked)
+    result = read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=_youtube_transport())
+    assert result.state == BLOCKED
+    assert result.text == ""
+    assert "IpBlocked" in result.note
+
+
+def test_fixture_reads_never_open_a_socket_to_youtube(monkeypatch, no_live_socket):
+    """Regression (R33): a fixture read must not reach YouTube through the caption library either."""
+    _use_captions(monkeypatch, [_Track("en", False, "fixture words only")])
+    assert read("https://www.youtube.com/watch?v=dQw4w9WgXcQ", transport=_youtube_transport()).state == OK
 
 
 @pytest.mark.skipif(not os.environ.get("LISTEN_APP_LIVE_NETWORK"),
                     reason="live YouTube check is opt-in: set LISTEN_APP_LIVE_NETWORK=1")
 def test_live_youtube_transcript_route_opt_in():
     """Explicit live check. Not run by default and not run in CI: it reaches YouTube for real."""
-    import listen_app.social_read as sr
+    import listen_app.transcript as tr
 
-    _text, note = sr._youtube_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-    assert note == "" or note.startswith("transcript unavailable") or "transcript" in note
+    result = tr.fetch_transcript("dQw4w9WgXcQ", "en")
+    assert result.state in (tr.OK, tr.UNAVAILABLE, tr.FAILED)
 
 
-def test_youtube_short_link_is_resolved_to_the_same_video():
-    transport = serves({
-        "https://www.youtube.com/oembed": (200, "application/json", body_of("oembed.json")),
-        "https://www.youtube.com/watch?v=": (200, "text/html", body_of("youtube_watch_page.html")),
-    })
-    assert read("https://youtu.be/dQw4w9WgXcQ", transport=transport).state == OK
+def test_youtube_short_link_is_resolved_to_the_same_video(monkeypatch, no_live_socket):
+    _use_captions(monkeypatch, [_Track("en", False, "the same video, read through the short link")])
+    result = read("https://youtu.be/dQw4w9WgXcQ", transport=_youtube_transport())
+    assert result.state == OK
+    assert "the same video" in result.text
 
 
 def test_github_repo_reads_metadata_and_readme():

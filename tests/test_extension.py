@@ -1021,7 +1021,7 @@ const calls = [];
 const sent = [];
 globalThis.chrome = {
   storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
-  tabs: { query: async () => [{ id: 7, url: "https://www.youtube.com/watch?v=abc" }] },
+  tabs: { query: async () => [{ id: 7, url: "https://www.youtube.com/@channel/featured" }] },
   scripting: {
     executeScript: async ({ files, func, args }) => {
       calls.push(files ? "inject"
@@ -1373,7 +1373,7 @@ const calls = [];
 const sent = [];
 globalThis.chrome = {
   storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
-  tabs: { query: async () => [{ id: 21, url: "https://m.youtube.com/watch?v=abc" }] },
+  tabs: { query: async () => [{ id: 21, url: "https://m.youtube.com/@channel/featured" }] },
   scripting: {
     executeScript: async ({ files, func, args }) => {
       const body = String(func);
@@ -1383,7 +1383,7 @@ globalThis.chrome = {
         : body.includes("ytm-comment-renderer") ? "poll"
         : "extract");
       if (files) {
-        globalThis.location = { href: "https://m.youtube.com/watch?v=abc", hostname: "m.youtube.com" };
+        globalThis.location = { href: "https://m.youtube.com/@channel/featured", hostname: "m.youtube.com" };
         globalThis.document = makeDocument();
         globalThis.window = {
           getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
@@ -2140,3 +2140,60 @@ def test_the_popup_dictate_button_routes_through_the_shared_client_call():
     assert "dictate" in popup.split('from "./client.js"')[0], "dictate must be imported from client.js"
     assert "await dictate()" in popup, popup[:400]
     assert "fetch(" not in popup, "the popup must never talk to the bridge on its own"
+
+
+YOUTUBE_ROUTE = r"""
+const { pathToFileURL } = await import("node:url");
+const dir = process.argv[2];
+const tabUrl = process.argv[3];
+const sent = [];
+let scraped = 0;
+globalThis.chrome = {
+  storage: { local: { get: async () => ({ "dictator.token": "t" }), set: async () => {} } },
+  tabs: { query: async () => [{ id: 5, url: tabUrl, title: "A video" }] },
+  scripting: {
+    executeScript: async ({ files }) => {
+      if (files) scraped += 1;
+      return [{ result: { text: "description and comments", url: tabUrl, title: "A video", how: "post" } }];
+    },
+  },
+};
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/ingest")) sent.push(JSON.parse(init.body));
+  return { ok: true, status: 200, json: async () => ({ ok: true, chars: 1 }) };
+};
+const client = await import(`${pathToFileURL(`${dir}/client.js`).href}?t=${Date.now()}`);
+const result = await client.sendPage("page");
+console.log(JSON.stringify({ result, scraped, sent }));
+"""
+
+
+@pytest.mark.parametrize("tab_url", [
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "https://youtu.be/dQw4w9WgXcQ",
+    "https://m.youtube.com/shorts/abc",
+])
+def test_a_youtube_video_sends_its_link_so_the_full_transcript_is_fetched(tmp_path, tab_url):
+    """Regression (PR #15): a video tab used to send the scraped description and comments as the content.
+
+    The page is no longer scraped for a video. The link is sent, and Listen fetches the transcript from it.
+    """
+    script = tmp_path / "youtube_route.mjs"
+    script.write_text(YOUTUBE_ROUTE, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT), tab_url], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    out = json.loads(run.stdout)
+    assert out["scraped"] == 0, "a video page must not be scraped for its description and comments"
+    assert out["sent"] == [{"kind": "url", "url": tab_url, "title": "A video"}]
+    assert out["result"]["ok"] is True
+
+
+def test_an_ordinary_page_is_still_read_from_the_page(tmp_path):
+    script = tmp_path / "ordinary_route.mjs"
+    script.write_text(YOUTUBE_ROUTE, encoding="utf-8")
+    run = subprocess.run([node(), str(script), str(EXT), "https://example.com/article"],
+                         capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stderr[:600]
+    out = json.loads(run.stdout)
+    assert out["scraped"] >= 1, "an ordinary page keeps the page-text route"
