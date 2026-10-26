@@ -295,7 +295,7 @@ def _read_youtube(url: str, transport) -> ReadResult:
         notes.append("description from the watch page")
     elif description_note:
         notes.append(description_note)
-    transcript, transcript_note = _youtube_transcript(url)
+    transcript, transcript_note = _youtube_transcript(url, transport)
     if transcript:
         parts.append(transcript)
         notes.append("transcript via youtube-transcript-api")
@@ -362,7 +362,7 @@ def _start_transcript_cooldown() -> None:
     _transcript_blocked_until = time.monotonic() + TRANSCRIPT_COOLDOWN_S
 
 
-def _youtube_transcript(url: str) -> tuple[str, str]:
+def _youtube_transcript(url: str, transport=http_get) -> tuple[str, str]:
     """English captions through youtube-transcript-api: anonymous, no key, no cookie, no yt-dlp.
 
     Round 15 measurement: yt-dlp was not installed on the Mac, so the old branch never ran.
@@ -372,6 +372,9 @@ def _youtube_transcript(url: str) -> tuple[str, str]:
     match = _VIDEO_ID.search(url)
     if not match or YouTubeTranscriptApi is None:
         return "", "no transcript route on this machine (youtube-transcript-api missing)"
+    if transport is not http_get:
+        # The caption library opens its own connection and cannot take the injected transport.
+        return "", "transcript skipped: an injected transport cannot reach the caption library"
     if time.monotonic() < _transcript_blocked_until:
         return "", "transcript paused: YouTube blocked this IP, cooling down"
     try:
