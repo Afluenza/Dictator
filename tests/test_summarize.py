@@ -58,3 +58,31 @@ def test_brackets_in_the_source_text_survive_into_the_note():
     for sentence in points:
         assert sentence in plain, f"{sentence!r} did not survive into the note"
     assert "https://example.com/a[1]?q=[x]" in plain
+
+
+def test_a_repeated_sentence_is_not_repeated_as_a_bullet():
+    """Captions and pages often repeat a line; the summary must list the idea once."""
+    text = " ".join(["Net metering credits owners for surplus power sent back to the grid."] * 6
+                    + ["Batteries let households use stored energy after dark."])
+    points = key_points(text, count=4)
+    assert len(points) == len(set(points)), points
+
+
+def test_points_cover_the_whole_source_not_one_cluster():
+    """A long source with ten distinct topics must not put every bullet in the first few topics."""
+    topics = [
+        "Solar panels convert sunlight into electricity using photovoltaic cells.",
+        "Battery storage lets households use stored energy after dark.",
+        "Grid operators balance supply and demand every second.",
+        "Installation costs have fallen sharply over the past decade.",
+        "Net metering credits owners for surplus power sent back to the grid.",
+        "Maintenance is minimal because panels have no moving parts.",
+        "Insurance and roof condition affect the total cost of ownership.",
+        "Local permits can add weeks to the schedule before work starts.",
+        "Cold climates reduce output but snow can reflect extra light.",
+        "Financing options include loans, leases and power purchase agreements.",
+    ]
+    text = " ".join(topics * 3)
+    points = key_points(text, count=5)
+    covered = {topics.index(p) for p in points if p in topics}
+    assert len(covered) >= 4, (covered, points)
