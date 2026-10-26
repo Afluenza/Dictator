@@ -25,8 +25,8 @@ import customtkinter as ctk
 
 from listen_app.extract import (SUPPORTED_SUFFIXES, ExtractError, UnsupportedInput, extract_file,
                                 validate_url)
+from listen_app import reading, theme
 from listen_app.playback import RenderAhead, play_buffered
-from listen_app import theme
 from listen_app.tts import MAX_SPEED, MIN_SPEED, clamp_speed
 
 POLL_MS = 100
@@ -49,7 +49,7 @@ class ListenApp(ctk.CTk):
     def __init__(self, engine_factory: Callable[[], object]) -> None:
         super().__init__()
         self.title("Listen")
-        self.geometry("720x560")
+        self.geometry("840x600")  # wide enough for the voice, language, speed, Read, Stop and Dictate row
         self.configure(**theme.body())
         self._engine = None
         self._busy = False
@@ -59,7 +59,7 @@ class ListenApp(ctk.CTk):
         self._cancel: threading.Event | None = None
         self._play_lock = threading.Lock()
         self._last_ahead: RenderAhead | None = None  # finished render, kept so Restart replays without rendering
-        self._popup: ctk.CTkToplevel | None = None
+        self._reading = reading.ReadingState()  # one phase and one position for the whole window (see reading.py)
         self._notes = None  # the Notes window, created on first use
         self._dictation_window = None  # the Dictation settings window, created on first use
         self._bridge = None  # the loopback listener the browser extension posts to
@@ -95,6 +95,12 @@ class ListenApp(ctk.CTk):
             text_color=theme.INK, corner_radius=theme.RADIUS, height=32, font=theme.font(theme.SIZE_BODY),
         )
         self.summarize_button.pack(side="right", padx=4, pady=6)
+        self.summarize_page_button = ctk.CTkButton(
+            header, text="Summarize this page to Listen", width=218, image=theme.icon("sparkle", size=14, color=theme.INK),
+            command=self._on_summarize_page, fg_color=theme.CHROME_HOVER, hover_color=theme.CHROME,
+            text_color=theme.INK, corner_radius=theme.RADIUS, height=32, font=theme.font(theme.SIZE_BODY),
+        )
+        self.summarize_page_button.pack(side="right", padx=4, pady=6)
         self.browser_button = ctk.CTkButton(
             header, text="Browser", width=104, image=theme.icon("globe", size=14, color=theme.INK),
             command=self._on_browser, fg_color=theme.CHROME_HOVER, hover_color=theme.CHROME,
@@ -125,10 +131,24 @@ class ListenApp(ctk.CTk):
         self.textbox.configure(scrollbar_button_color=theme.SURFACE_HI,
                                scrollbar_button_hover_color=theme.SURFACE_HOVER)
         self.textbox.grid(row=2, column=0, padx=16, pady=8, sticky="nsew")
+        self._configure_band_colours()
+        # A click still places the cursor and selects text as before. The click only also sets the reading
+        # start when it lands on a word; editing is never blocked (see _token_at_click).
+        self.textbox._textbox.bind("<ButtonRelease-1>", self._token_at_click, add="+")
+        self.textbox._textbox.bind("<Key>", self._on_key_edit, add="+")
+        # Keyboard equivalent of a click: Option+Left/Right move the start word, Option+Return starts Read from it.
+        # Plain arrows stay with the caret, so ordinary editing is untouched.
+        self.textbox._textbox.bind("<Option-Left>", lambda _e: self._move_start_word(-1), add="+")
+        self.textbox._textbox.bind("<Option-Right>", lambda _e: self._move_start_word(1), add="+")
+        self.textbox._textbox.bind("<Option-Return>", lambda _e: self._on_read(), add="+")
+        self.textbox._textbox.bind("<Alt-Left>", lambda _e: self._move_start_word(-1), add="+")
+        self.textbox._textbox.bind("<Alt-Right>", lambda _e: self._move_start_word(1), add="+")
+        self.textbox._textbox.bind("<Alt-Return>", lambda _e: self._on_read(), add="+")
 
         controls = ctk.CTkFrame(self, **theme.surface())
         controls.grid(row=3, column=0, padx=16, pady=(8, 16), sticky="ew")
-        controls.grid_columnconfigure(1, weight=1)
+        # The speed slider is column 2 and takes the spare width, so the fixed controls keep their size.
+        controls.grid_columnconfigure(2, weight=1)
         self.voice_menu = ctk.CTkOptionMenu(
             controls, values=["loading..."], width=150, corner_radius=theme.RADIUS,
             fg_color=theme.SURFACE_HI, button_color=theme.SURFACE_HI, button_hover_color=theme.SURFACE_HOVER,
@@ -136,6 +156,16 @@ class ListenApp(ctk.CTk):
             dropdown_hover_color=theme.ACCENT, dropdown_text_color=theme.TEXT,
         )
         self.voice_menu.grid(row=0, column=0, padx=8, pady=8)
+        # Language: Auto-detect, or a fixed language. The chosen language decides the voice (see reading.choose_voice).
+        self.language_menu = ctk.CTkOptionMenu(
+            controls, values=[reading.AUTO, *(f"{code}  {label}" for code, (label, _v) in reading.LANGUAGES.items())],
+            width=150, corner_radius=theme.RADIUS, fg_color=theme.SURFACE_HI, button_color=theme.SURFACE_HI,
+            button_hover_color=theme.SURFACE_HOVER, text_color=theme.TEXT, font=theme.font(theme.SIZE_BODY),
+            dropdown_fg_color=theme.SURFACE, dropdown_hover_color=theme.ACCENT, dropdown_text_color=theme.TEXT,
+            command=lambda _choice: self._on_language_changed(),
+        )
+        self.language_menu.set(reading.AUTO)
+        self.language_menu.grid(row=0, column=6, padx=(8, 0), pady=8)
         self.speed_label = ctk.CTkLabel(controls, text="Speed 1.00x", text_color=theme.TEXT,
                                         font=theme.font(theme.SIZE_BODY))
         self.speed_label.grid(row=0, column=1, padx=8, pady=8, sticky="w")
@@ -163,6 +193,17 @@ class ListenApp(ctk.CTk):
             controls, text="Dictate", width=96, image=theme.icon("mic", size=14),
             command=self._on_dictate, **theme.button("secondary"))
         self.dictate_button.grid(row=0, column=5, padx=(8, 0), pady=8)
+        # Finished controls. They are shown only after natural completion, never after a Stop, and they replace the
+        # old separate popup, so every completion action stays in this window.
+        self.restart_button = ctk.CTkButton(controls, text="Restart", width=96,
+                                            image=theme.icon("play", size=14, color=theme.ON_ACCENT),
+                                            command=self._on_restart, **theme.button("primary"))
+        self.new_button = ctk.CTkButton(controls, text="New", width=84, command=self._on_new,
+                                        **theme.button("secondary"))
+        self.restart_button.grid(row=1, column=3, padx=8, pady=(0, 8))
+        self.new_button.grid(row=1, column=4, padx=8, pady=(0, 8))
+        self.restart_button.grid_remove()
+        self.new_button.grid_remove()
 
         self.status = ctk.CTkLabel(self, text="Loading voice engine...", anchor="w", text_color=theme.TEXT_DIM,
                                    font=theme.font(theme.SIZE_SUB))
@@ -256,67 +297,201 @@ class ListenApp(ctk.CTk):
             self._on_dictated(str(payload))
         elif kind == "dictation_state":
             self._set_dictating(bool(payload))
+        elif kind == "sentence":
+            cancel, sentence = payload
+            # A sentence from a run that was stopped or replaced must not move the band of the current run.
+            if cancel is not self._cancel or self._cancel.is_set():
+                return
+            self._highlight_sentence(sentence)
+        elif kind == "summary_ready":
+            self._on_summary_ready(payload)
+        elif kind == "summary_failed":
+            seq, message = payload
+            if seq == getattr(self, "_summary_seq", 0):
+                self.status.configure(text=f"No summary: {message}")
         elif kind == "done":
             self._busy = False
             self.progress.set(0)
+            self._clear_band()
             self._set_buttons(read=True, stop=False)
             self.status.configure(text=str(payload))
         else:
             raise ValueError(f"unknown event {kind!r}")
 
-    def _set_buttons(self, read: bool, stop: bool) -> None:
-        """Show which control is live. A disabled button flattens, so it cannot be mistaken for an active one."""
+    def _set_buttons(self, read: bool, stop: bool, finished: bool = False) -> None:
+        """Show which control is live. A disabled button flattens, so it cannot be mistaken for an active one.
+
+        `finished` shows Restart and New in place of Read and Stop. It is set only after natural completion.
+        """
         theme.set_enabled(self.read_button, "primary", read)
         theme.set_enabled(self.stop_button, "secondary", stop)
+        if finished:
+            self.restart_button.grid()
+            self.new_button.grid()
+            self.read_button.grid_remove()
+            self.stop_button.grid_remove()
+        else:
+            self.restart_button.grid_remove()
+            self.new_button.grid_remove()
+            self.read_button.grid()
+            self.stop_button.grid()
 
-    # ----- finished popup ------------------------------------------------------
+    # ----- completion (in this window; no popup) -------------------------------
     def _finish(self, ahead: RenderAhead) -> None:
-        """Playback reached the end of the text. Only Stop or an error ends it early, and those do not reach here."""
+        """Playback reached the end of the text by itself. Restart and New appear here, in this window."""
         self._busy = False
         self._last_ahead = ahead
+        self._reading.finish()
+        self._clear_band()
         self.progress.set(0)
-        self._set_buttons(read=True, stop=False)
-        self.status.configure(text="Finished.")
-        self._show_finished_popup()
+        self._set_buttons(read=False, stop=False, finished=True)
+        self.status.configure(text="Finished reading. Restart to hear it again, or New for new text.")
 
-    def _show_finished_popup(self) -> None:
-        popup = ctk.CTkToplevel(self)
-        popup.title("Finished")
-        popup.geometry("340x170")
-        popup.resizable(False, False)
-        popup.configure(**theme.body())
-        popup.transient(self)
-        ctk.CTkLabel(popup, text="Finished reading.", text_color=theme.TEXT,
-                     font=theme.font(theme.SIZE_HEAD, "bold")).pack(padx=24, pady=(28, 4))
-        ctk.CTkLabel(popup, text="Replay this text, or start a new one.", text_color=theme.TEXT_DIM,
-                     font=theme.font(theme.SIZE_SMALL)).pack(padx=24, pady=(0, 14))
-        row = ctk.CTkFrame(popup, fg_color="transparent")
-        row.pack(pady=(0, 12))
-        ctk.CTkButton(row, text="Restart", width=110, image=theme.icon("play", size=14, color=theme.ON_ACCENT),
-                      command=lambda: self._close_popup(popup, restart=True), **theme.button("primary")
-                      ).pack(side="left", padx=8)
-        ctk.CTkButton(row, text="New", width=110, command=lambda: self._close_popup(popup, restart=False),
-                      **theme.button("secondary")).pack(side="left", padx=8)
-        popup.protocol("WM_DELETE_WINDOW", lambda: self._close_popup(popup, restart=False))
-        self._popup = popup
-        popup.after(100, popup.grab_set)
-
-    def _close_popup(self, popup: ctk.CTkToplevel, restart: bool) -> None:
-        """Restart replays the cached audio. New clears the text and the cache for a new playback."""
-        popup.grab_release()
-        popup.destroy()
-        self._popup = None
-        if restart and self._last_ahead is not None:
-            self._start_playback("", "", 1.0, reuse=self._last_ahead)
+    def _on_restart(self) -> None:
+        """Replay the finished text from the top, reusing the cached audio, with no new render and no popup."""
+        if self._busy or self._last_ahead is None:
             return
+        self._reading.restart()
+        self._busy = True
+        self._set_buttons(read=False, stop=True)
+        self.status.configure(text="Restarting...")
+        self.progress.set(0)
+        self._cancel = threading.Event()
+        threading.Thread(target=self._read_worker,
+                         args=("", None, 1.0, self._cancel, self._last_ahead), daemon=True).start()
+
+    def _on_new(self) -> None:
+        """Clear the text and the completion state, then put the cursor in the box for new input."""
         self._last_ahead = None
+        self._reading.new()
         self._set_text("")
+        self._loaded_source = ""
+        self._set_buttons(read=True, stop=False)
         self.status.configure(text="Ready. Enter new text.")
+        self.textbox.focus_set()
 
     # ----- input handlers ----------------------------------------------------
     def _set_text(self, text: str) -> None:
         self.textbox.delete("1.0", "end")
         self.textbox.insert("1.0", text)
+        self._reset_highlight_map()
+
+    # ----- reading highlight and click-to-start ----------------------------------
+    # The reading view is the one text box. Words are found by reading.word_spans for the chosen language, and their
+    # Tk character offsets are kept so a click can be mapped back to a token index.
+    def _reset_highlight_map(self) -> None:
+        """Forget the word map. Called on every text change so a stale map never points into new text."""
+        self._tokens: list[tuple[str, str]] = []  # (tk start index, tk end index) per token, in reading order
+        self._token_lang = ""
+        self._sentence_plans: list = []
+        self._clear_band()
+
+    def _build_token_map(self, text: str, lang: str, base: str = "1.0") -> None:
+        """Index every word of `text`, placed at Tk index `base`, so a click and the highlight both resolve in O(1).
+
+        `text` is the exact string that is spoken, and `base` is where it begins in the box. The offsets are
+        character counts from that point, which is why the text and its base must come from the same read.
+        """
+        self._tokens = []
+        origin = base if base.startswith("1.0") else "1.0"
+        offset = int(origin.split("+")[1].rstrip("c")) if "+" in origin else 0
+        for start, end in reading.word_spans(text, lang):
+            self._tokens.append((f"1.0+{offset + start}c", f"1.0+{offset + end}c"))
+        self._token_lang = lang
+
+    def _apply_band(self, token: int | None) -> None:
+        """Highlight the spoken word strongly, and its neighbours lightly. Uses the theme's accent, never a fixed colour."""
+        self._clear_band()
+        if token is None or not self._tokens:
+            return
+        first, last = reading.band(token, len(self._tokens))
+        for index in range(first, last):
+            start, end = self._tokens[index]
+            self.textbox._textbox.tag_add("band_context" if index != token else "band_current", start, end)
+        self.textbox._textbox.see(self._tokens[token][0])
+
+    def _clear_band(self) -> None:
+        inner = self.textbox._textbox
+        inner.tag_remove("band_context", "1.0", "end")
+        inner.tag_remove("band_current", "1.0", "end")
+
+    def _configure_band_colours(self) -> None:
+        """Tag colours from the theme's own tokens. The accent is blended into the well so text stays readable."""
+        inner = self.textbox._textbox
+        context = reading.blend(theme.ACCENT, theme.INPUT, 0.22)
+        current = reading.blend(theme.ACCENT, theme.INPUT, 0.55)
+        inner.tag_configure("band_context", background=context, foreground=theme.TEXT)
+        inner.tag_configure("band_current", background=current, foreground=theme.ON_ACCENT)
+        inner.tag_raise("band_current")
+
+    def _on_key_edit(self, event) -> None:
+        """Typing changes the text, so any speech of the old text stops and the next Read uses the new text.
+
+        Only text-changing keys count. Arrow keys, Shift, Tab and copy shortcuts leave the text and the position alone.
+        """
+        navigation = ("Shift_L", "Shift_R", "Control_L", "Control_R", "Command", "Option_L", "Option_R",
+                      "Left", "Right", "Up", "Down", "Home", "End", "Tab", "Escape")
+        if event.keysym in navigation or event.state & 0x8:  # 0x8: Command or Alt held, so a shortcut, not typing
+            return
+        editing_key = event.keysym in ("BackSpace", "Delete", "Return")
+        printable = bool(event.char) and event.char.isprintable()
+        if not (printable or editing_key):
+            return
+        if self._busy:
+            self._on_stop()
+        if self._reading.phase != reading.READY or self._reading.position:
+            self._reading.edit()
+            self._set_buttons(read=True, stop=False)
+        self._clear_band()
+        self._tokens = []  # the map is rebuilt from the new text when Read next starts
+
+    def _move_start_word(self, step: int) -> str:
+        """Move the reading start one word forward or back, from the keyboard. Returns "break" to keep the caret still.
+
+        Same result as a click: speech stops, the start word is set, and Read begins there. With no word map yet
+        the first press builds it from the box, so the keyboard works before any playback has happened.
+        """
+        if not self._tokens:
+            raw = self.textbox.get("1.0", "end-1c")
+            lead = len(raw) - len(raw.lstrip())
+            spoken = raw[lead:].rstrip()
+            if not spoken:
+                return "break"
+            lang = reading.resolve_language(spoken, self._language_choice())
+            self._build_token_map(spoken, lang, base=f"1.0+{lead}c")
+        if self._busy:
+            self._on_stop()
+        target = min(max(self._reading.position + step, 0), len(self._tokens) - 1)
+        self._reading.select(target)
+        self._apply_band(target)
+        self.status.configure(text=f"Reading will start at word {target + 1}. Press Read or Option+Return.")
+        self._set_buttons(read=True, stop=False)
+        return "break"
+
+    def _highlight_sentence(self, sentence: int) -> None:
+        """Move the band to the start of the sentence being spoken (the first word of that sentence).
+
+        Within a sentence the band stays on its first word. Neither engine reports word boundaries, so
+        per-word movement inside a sentence is an estimate, and the band is only exact at sentence starts.
+        """
+        plans = getattr(self, "_sentence_plans", [])
+        if not (0 <= sentence < len(plans)) or plans[sentence].count == 0:
+            return
+        token = plans[sentence].first_token
+        self._apply_band(token)
+
+    def _token_at_click(self, event) -> None:
+        """A click on a word moves the reading position there. A click that is not on a word is ordinary editing."""
+        if self._busy:
+            self._on_stop()
+        index = self.textbox._textbox.index(f"@{event.x},{event.y}")
+        for token, (start, end) in enumerate(self._tokens):
+            if self.textbox._textbox.compare(index, ">=", start) and self.textbox._textbox.compare(index, "<", end):
+                self._reading.select(token)
+                self._apply_band(None)
+                self.status.configure(text="Reading will start from the word you chose. Press Read.")
+                self._set_buttons(read=True, stop=False)
+                return
 
     def _on_upload(self) -> None:
         from tkinter import filedialog
@@ -508,6 +683,62 @@ class ListenApp(ctk.CTk):
         self._notes.offer_summary(markup)
         self.status.configure(text="Key points ready. Choose a note in the Notes window.")
 
+    def _on_summarize_page(self) -> None:
+        """"Summarize this page to Listen": fetch the whole source, then put a labelled summary in the reading view.
+
+        The source is read first with the same route as Paste Link, so a YouTube video is summarised from its full
+        transcript and never from its description or comments. The summary scores sentences across the whole source,
+        so nothing past the first part is dropped. A partial or unavailable source is disclosed before the summary.
+        """
+        from listen_app.summarize import key_points
+        from listen_app.social_read import read
+
+        url = self.url_entry.get().strip()
+        try:
+            url = validate_url(url)
+        except ValueError as exc:
+            self.status.configure(text=str(exc))
+            return
+        if self._busy:
+            self.status.configure(text="Stop the reading first, then summarise.")
+            return
+        self.status.configure(text="Reading the whole source before summarising...")
+        self._summary_seq = getattr(self, "_summary_seq", 0) + 1
+        seq = self._summary_seq
+
+        def worker() -> None:
+            result = read(url)
+            if not result.ok:
+                self._events.put(("summary_failed", (seq, result.failure_message())))
+                return
+            points = key_points(result.text)
+            self._events.put(("summary_ready", (seq, result, points)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_summary_ready(self, payload) -> None:
+        """Put the summary in the box, labelled as a summary, with its source and any disclosure above it."""
+        seq, result, points = payload
+        if seq != getattr(self, "_summary_seq", 0):
+            return  # a newer summary request has started; this one is stale and must not overwrite it
+        if not points:
+            self.status.configure(text="No key points found in the source.")
+            return
+        lines = [f"Summary of: {result.title or result.url}", f"Source: {result.url}"]
+        if result.meta.get("transcript_fallback"):
+            lines.append(f"Note: the transcript is in {result.meta.get('transcript_language')}, not your chosen language.")
+        if result.note and "fallback" not in result.note:
+            lines.append(f"Note: {result.note}.")
+        lines.append("")
+        lines.append("This is a summary of the source, not the full text.")
+        lines.append("")
+        lines.extend(f"- {point}" for point in points)
+        self._set_text("\n".join(lines))
+        self._loaded_source = result.url
+        self._reading.edit()
+        self._set_buttons(read=True, stop=False)
+        self.status.configure(text="Summary ready. Press Read to hear it, or edit it first.")
+
     def _on_dictation_settings(self) -> None:
         """Open the Dictation window once; a second press lifts the existing one."""
         from listen_app.dictation_gui import DictationWindow
@@ -542,6 +773,13 @@ class ListenApp(ctk.CTk):
         self.speed_label.configure(text=f"Speed {clamp_speed(value):.2f}x")
 
     # ----- read / stop ------------------------------------------------------------
+    def _on_language_changed(self) -> None:
+        """The language menu changed. Speech from here on uses the new language; anything playing stops first."""
+        if self._busy:
+            self._on_stop()
+        self._reading.edit()
+        self.status.configure(text=f"Language set to {self.language_menu.get().strip()}.")
+
     def _on_read(self) -> None:
         text = self.textbox.get("1.0", "end").strip()
         if self._busy or self._engine is None:
@@ -549,30 +787,75 @@ class ListenApp(ctk.CTk):
         if not text:
             self.status.configure(text="Nothing to read")
             return
-        voice = self.voice_menu.get()
+        lang = reading.resolve_language(text, self._language_choice())
+        choice = reading.choose_voice(lang, self._say_voice_names(), kokoro_ready=self._kokoro_ready())
+        if not choice.engine:
+            # No voice can speak this language. Say so and stop: never play it in a different language, and never
+            # show a successful playback state for speech that cannot start.
+            self.status.configure(text=choice.note)
+            return
         speed = clamp_speed(self.speed.get())
-        self._start_playback(text, voice, speed, reuse=None)
+        # The map and the spoken text come from ONE string, with offsets from the box's own start. Stripping the
+        # text first shifted every token by the leading whitespace (measured: 3 characters), so the band
+        # would have highlighted the wrong word.
+        raw = self.textbox.get("1.0", "end-1c")
+        lead = len(raw) - len(raw.lstrip())
+        spoken = raw[lead:].rstrip()
+        self._build_token_map(spoken, lang, base=f"1.0+{lead}c")
+        # The renderer speaks one sentence at a time, split by the same rule, so the plan maps sentence -> first word.
+        from listen_app.tts import split_sentences
 
-    def _start_playback(self, text: str, voice: str, speed: float, reuse: RenderAhead | None) -> None:
-        """Start a render-and-play run, or replay `reuse` (a finished render) without rendering again."""
+        self._sentence_plans = reading.sentence_plan(split_sentences(spoken), lang)
+        self._reading.read()
+        self._start_playback(text, choice, speed, reuse=None)
+
+    def _language_choice(self) -> str:
+        label = self.language_menu.get().strip()
+        if label == reading.AUTO:
+            return reading.AUTO
+        return label.split()[0]
+
+    def _kokoro_ready(self) -> bool:
+        """True only when the loaded engine is Kokoro. Both engines share a sample rate, so the type is the test."""
+        from listen_app.tts import KokoroEngine
+
+        return isinstance(self._engine, KokoroEngine)
+
+    def _say_voice_names(self) -> list[str]:
+        """The macOS voices available, read once. A machine without `say` returns none, which is reported."""
+        if not hasattr(self, "_say_voices_cache"):
+            from listen_app.tts import SayEngine
+
+            try:
+                self._say_voices_cache = SayEngine().voice_names()
+            except RuntimeError:
+                self._say_voices_cache = []
+        return self._say_voices_cache
+
+    def _start_playback(self, text: str, choice, speed: float, reuse: RenderAhead | None) -> None:
+        """Start a render-and-play run. `choice` says which engine and voice speak the text."""
         self._busy = True
         self._set_buttons(read=False, stop=True)
-        self.status.configure(text="Preparing audio..." if reuse is None else "Restarting...")
+        self.status.configure(text=choice.note if reuse is None else "Restarting...")
         self.progress.set(0)
         self._cancel = threading.Event()
         threading.Thread(
-            target=self._read_worker, args=(text, voice, speed, self._cancel, reuse), daemon=True
+            target=self._read_worker, args=(text, choice, speed, self._cancel, reuse), daemon=True
         ).start()
 
     def _read_worker(
-        self, text: str, voice: str, speed: float, cancel: threading.Event, reuse: RenderAhead | None
+        self, text: str, choice, speed: float, cancel: threading.Event, reuse: RenderAhead | None
     ) -> None:
         try:
             import sounddevice as sd
 
-            rate = self._engine.sample_rate
+            from listen_app.tts import SayEngine
+
+            engine = self._engine if choice is None or choice.engine == "kokoro" else SayEngine()
+            voice = "" if choice is None or choice.engine == "kokoro" else choice.voice
+            rate = engine.sample_rate
             if reuse is None:
-                ahead = RenderAhead(self._engine, text, voice, speed, cancel)
+                ahead = RenderAhead(engine, text, voice, speed, cancel)
             else:
                 ahead = reuse
                 ahead.rewind(cancel)
@@ -584,6 +867,7 @@ class ListenApp(ctk.CTk):
                 wait=sd.wait,
                 on_start=lambda: self._events.put(("status", "Playing...")),
                 on_progress=lambda fraction, message: self._events.put(("progress", (fraction, message))),
+                on_chunk=lambda sentence: self._events.put(("sentence", (cancel, sentence))),
             )
             if completed:
                 self._events.put(("finished", ahead))
@@ -593,14 +877,18 @@ class ListenApp(ctk.CTk):
             self._events.put(("done", f"Playback failed: {type(exc).__name__}: {exc}"))
 
     def _on_stop(self) -> None:
-        """Stop is the only way playback ends early. It is pressed by the user, never triggered by the app."""
+        """Stop is the only way playback ends early. It is pressed by the user, never triggered by the app.
+
+        The text and the reading position are kept, so Read resumes from the word being spoken.
+        """
         import sounddevice as sd
 
         with self._play_lock:
             if self._cancel is not None:
                 self._cancel.set()
             sd.stop()
-        self._set_buttons(read=False, stop=False)
+        self._reading.stop()
+        self._set_buttons(read=True, stop=False)
 
 
 def smoke(engine_factory: Callable[[], object], timeout_s: float = 120.0) -> dict:

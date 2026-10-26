@@ -31,16 +31,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-try:  # MIT, no key, no account. Missing install means no transcript, never a crash.
-    from youtube_transcript_api import (
-        IpBlocked,
-        NoTranscriptFound,
-        TranscriptsDisabled,
-        YouTubeTranscriptApi,
-    )
-except ImportError:  # pragma: no cover - the dependency is pinned in pyproject.toml
-    YouTubeTranscriptApi = None
-    NoTranscriptFound = TranscriptsDisabled = IpBlocked = Exception
+from listen_app import transcript as transcript_mod
 
 TIMEOUT_S = 25
 MAX_CHARS = 60_000  # a post longer than this is trimmed, and the note says so
@@ -271,8 +262,9 @@ def _jina(url: str, transport) -> ReadResult:
 
 
 # ----- YouTube --------------------------------------------------------------
-def _read_youtube(url: str, transport) -> ReadResult:
-    """oEmbed gives a real title and author; a transcript is added only when one truly exists."""
+def _read_youtube(url: str, transport, language: str = "en") -> ReadResult:
+    """A YouTube video's content is its transcript. oEmbed gives the title and author; the description and
+    the page text are context, and are never presented as the video's content."""
     oembed = "https://www.youtube.com/oembed?" + urllib.parse.urlencode({"url": url, "format": "json"})
     status, _ctype, body = transport(oembed, None, TIMEOUT_S)
     meta = {}
@@ -286,41 +278,34 @@ def _read_youtube(url: str, transport) -> ReadResult:
         return ReadResult(BLOCKED, "youtube", url, "YouTube oEmbed",
                           title=_error_message(body), note="youtube.com")
 
-    parts, notes = [], []
-    if title:
-        parts.append(f"{title} — {author}" if author else title)
-    description, description_note = _youtube_description(url, transport)
-    if description:
-        parts.append(description)
-        notes.append("description from the watch page")
-    elif description_note:
-        notes.append(description_note)
-    transcript, transcript_note = _youtube_transcript(url, transport)
-    if transcript:
-        parts.append(transcript)
-        notes.append("transcript via youtube-transcript-api")
-    else:
-        notes.append(transcript_note)
-    if not description:
-        page = _jina(url, transport)
-        if page.ok:
-            parts.append(page.text)
-            notes.append("page text via Jina Reader")
-        elif page.state == BLOCKED:
-            notes.append("page text blocked")
-
-    text = "\n\n".join(p for p in parts if p.strip())
-    if len(text) < MIN_CONTENT_CHARS or len(parts) < 2:
-        # Only the oEmbed title line: real, but a title is not a post. Say so instead of
-        # summarising a headline as if it were the content.
-        detail = "; ".join(n for n in notes if n) or "no title or transcript found"
-        return ReadResult(EMPTY, "youtube", url, "YouTube oEmbed", title=title,
-                          note=f"found the video ({title or 'untitled'}) but no body text — {detail}")
-    return ReadResult(OK, "youtube", url, "YouTube oEmbed", title=title or url, text=_trim(text),
-                      note="; ".join(n for n in notes if n), meta=meta)
+    video_id = _video_id(url)
+    transcript = transcript_mod.fetch_transcript(video_id, language) if video_id else None
+    if transcript is None or transcript.state != transcript_mod.OK:
+        # No transcript: say so, and stop. The description and comments are not the video's words, so they are
+        # never substituted. The state separates "none exists" (unavailable) from "could not reach it" (failed).
+        why = transcript.note if transcript else "no video id in the link"
+        state = EMPTY if transcript is None or transcript.state == transcript_mod.UNAVAILABLE else BLOCKED
+        label = title or "untitled video"
+        return ReadResult(state, "youtube", url, "YouTube transcript", title=title or url,
+                          note=f"{label}: {why}",
+                          meta={**meta, "transcript_state": transcript.state if transcript else "none",
+                                "available_languages": transcript.available if transcript else []})
+    head = f"{title} — {author}" if author else title
+    body = "\n\n".join(p for p in (head, transcript.text) if p)
+    return ReadResult(OK, "youtube", url, "YouTube transcript", title=title or url, text=_trim_full(body),
+                      note=transcript.note,
+                      meta={**meta, "transcript_language": transcript.language,
+                            "transcript_generated": transcript.generated,
+                            "transcript_fallback": transcript.fallback,
+                            "available_languages": transcript.available})
 
 
 _VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})")
+
+
+def _video_id(url: str) -> str:
+    match = _VIDEO_ID.search(url)
+    return match.group(1) if match else ""
 
 
 def _youtube_description(url: str, transport) -> tuple[str, str]:
@@ -349,47 +334,6 @@ def _youtube_description(url: str, transport) -> tuple[str, str]:
     description = re.sub(r"https?://\S+", "", description)  # promo links are not prose
     description = re.sub(r"\n{2,}", "\n", description).strip()
     return (description, "") if len(description) >= MIN_CONTENT_CHARS else ("", "description too short")
-
-
-# After YouTube blocks this IP, every further call deepens the block. Pause transcript calls
-# for a while. Measured on 2026-10-18 after a burst of test requests: IpBlocked on every video.
-TRANSCRIPT_COOLDOWN_S = 15 * 60
-_transcript_blocked_until = 0.0
-
-
-def _start_transcript_cooldown() -> None:
-    global _transcript_blocked_until
-    _transcript_blocked_until = time.monotonic() + TRANSCRIPT_COOLDOWN_S
-
-
-def _youtube_transcript(url: str, transport=http_get) -> tuple[str, str]:
-    """English captions through youtube-transcript-api: anonymous, no key, no cookie, no yt-dlp.
-
-    Round 15 measurement: yt-dlp was not installed on the Mac, so the old branch never ran.
-    This route returned real transcripts for 3 of 5 videos in about 1 s each. The other two were
-    an honest "no transcript" and "unavailable", which are reported as notes, not as text.
-    """
-    match = _VIDEO_ID.search(url)
-    if not match or YouTubeTranscriptApi is None:
-        return "", "no transcript route on this machine (youtube-transcript-api missing)"
-    if transport is not http_get:
-        # The caption library opens its own connection and cannot take the injected transport.
-        return "", "transcript skipped: an injected transport cannot reach the caption library"
-    if time.monotonic() < _transcript_blocked_until:
-        return "", "transcript paused: YouTube blocked this IP, cooling down"
-    try:
-        fetched = YouTubeTranscriptApi().fetch(match.group(1), languages=["en"])
-    except NoTranscriptFound:
-        return "", "no English transcript on this video"
-    except TranscriptsDisabled:
-        return "", "transcripts are disabled on this video"
-    except IpBlocked as exc:
-        _start_transcript_cooldown()
-        return "", f"transcript unavailable ({type(exc).__name__}): YouTube blocked this IP"
-    except Exception as exc:  # the library reports network and unavailable states by type
-        return "", f"transcript unavailable ({type(exc).__name__})"
-    text = " ".join(s.text.strip() for s in fetched.snippets if s.text.strip())
-    return (text, "") if text else ("", "transcript was empty")
 
 
 # ----- GitHub, V2EX, feeds --------------------------------------------------
@@ -518,6 +462,19 @@ def _find_text(node, name: str) -> str:
 def _trim(text: str) -> str:
     text = text.strip()
     return text if len(text) <= MAX_CHARS else text[:MAX_CHARS].rsplit(" ", 1)[0] + "\n\n[trimmed]"
+
+
+# A transcript is the video's content, so it is never cut short for a real video. Measured estimate: a 3-hour talk
+# is about 194,000 characters and an 8-hour stream about 518,000. This ceiling sits above any real video and only
+# guards against a runaway response; if it is ever reached, the text says so.
+MAX_TRANSCRIPT_CHARS = 2_000_000
+
+
+def _trim_full(text: str) -> str:
+    text = text.strip()
+    if len(text) <= MAX_TRANSCRIPT_CHARS:
+        return text
+    return text[:MAX_TRANSCRIPT_CHARS].rsplit(" ", 1)[0] + "\n\n[transcript exceeds the safety ceiling; the rest was not read]"
 
 
 def _jina_title(raw: str) -> str:
