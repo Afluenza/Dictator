@@ -37,21 +37,51 @@ def _words(sentence: str) -> list[str]:
     return [run[i:i + 2] for run in _DENSE.findall(lowered) for i in range(len(run) - 1)]
 
 
+def _pick(sentences: list[str], scored: dict[int, float], count: int) -> list[int]:
+    """Indexes of the chosen sentences, in order.
+
+    The source is cut into `count` equal sections and the best-scoring sentence in each is kept, so a long
+    source is covered from start to end. A sentence whose text already appeared is skipped, so a repeated
+    caption line is never listed twice. A short source with fewer sections than points is covered as well.
+    """
+    chosen: list[int] = []
+    seen: set[str] = set()
+    total = len(sentences)
+    # A sentence with no word in common with any other is off-topic: its score is exactly 1.0, so it is
+    # never a key point while a shared-vocabulary sentence exists. Only when none exists does the fallback
+    # below keep the top sentences, so a short or unrelated text still gets a summary.
+    eligible = {i: s for i, s in scored.items() if s > 1.0}
+    for section in range(count):
+        lo, hi = section * total // count, (section + 1) * total // count
+        best = None
+        for index in range(lo, hi):
+            if index not in eligible or " ".join(sentences[index].lower().split()) in seen:
+                continue
+            if best is None or eligible[index] > eligible[best]:
+                best = index
+        if best is not None:
+            chosen.append(best)
+            seen.add(" ".join(sentences[best].lower().split()))
+    if not chosen:
+        ranked = sorted(scored, key=lambda i: scored[i], reverse=True)
+        chosen = sorted(ranked[:count])
+    return sorted(chosen)
+
+
 def key_points(text: str, count: int = DEFAULT_POINTS) -> list[str]:
     """Return up to `count` key sentences, in original order, each shortened if very long."""
     sentences = split_sentences(text)
     if not sentences:
         return []
     frequency = Counter(w for s in sentences for w in _words(s))
-    scored = []
+    scored: dict[int, float] = {}
     for index, sentence in enumerate(sentences):
         words = _words(sentence)
         if not words:
             continue
         # Average frequency per word, so one long sentence does not win just by length.
-        score = sum(frequency[w] for w in words) / len(words)
-        scored.append((score, index))
-    chosen = sorted(index for _score, index in sorted(scored, reverse=True)[:count])
+        scored[index] = sum(frequency[w] for w in words) / len(words)
+    chosen = _pick(sentences, scored, count)
     points = []
     for index in chosen:
         sentence = sentences[index]
