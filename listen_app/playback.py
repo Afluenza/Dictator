@@ -9,11 +9,15 @@ Rules:
   If rendering falls behind, the player waits for the next sentence. It never ends on its own.
 - While playing, the renderer pauses once it is AHEAD_CAP_S ahead of the listener, so it
   does not burn CPU rendering audio nobody needs yet. It resumes as playback advances.
+- The player opens ONE output stream for the whole run. Opening a stream per sentence cost about
+  265 ms of dead air at every seam on this machine (measured in rea/buffer-audit.md), which is the
+  silent stutter the listener heard between sentences.
 """
 
 from __future__ import annotations
 
 import math
+import queue
 import threading
 import time
 from typing import Any, Callable
@@ -29,6 +33,8 @@ AHEAD_CAP_S = 30.0  # while playing, the renderer pauses this far ahead of the l
 EARLY_SENTENCES = 3  # the start decision waits for this many sentences, so the speed estimate settles
 RATE_MARGIN = 1.25  # plan for a render 25% slower than measured, so a slow passage later in the text cannot stall playback
 POLL_S = 0.1
+COMPACT_AFTER_S = 120.0  # audio already played past this is downcast to int16, so a long listen holds half as much
+RETAIN_MAX_BYTES = 64 * 1024 * 1024  # retained audio for a finished render; past it the oldest played chunks are released
 
 
 def start_threshold(total_audio_s: float, rate: float) -> float:
@@ -60,8 +66,13 @@ class RenderAhead:
         self._worst_rate = 0.0  # slowest single sentence so far; a later passage can be slower than the opening
         self._played_s = 0.0
         self._started = False
+        self._ahead_cap_s = AHEAD_CAP_S  # raised to the planned lead at start, so the gate cannot discard it
         self._underruns = 0
         self._done = False
+        self._replayable = True  # False once played audio is released; Restart then renders the text again
+        self._handled = 0  # first chunk whose released/compacted form has been decided
+        self._handled_end_s = 0.0  # audio seconds up to and including the last chunk handled
+        self._retained_bytes = 0  # bytes held in _chunks right now
         self._error: BaseException | None = None
         threading.Thread(target=self._run, args=(engine, text, voice, speed), daemon=True).start()
 
@@ -69,6 +80,18 @@ class RenderAhead:
     def underruns(self) -> int:
         """How many times the player had to wait for rendering. Playback never ended because of it."""
         return self._underruns
+
+    @property
+    def replayable(self) -> bool:
+        """True while the whole render is still held, so Restart can replay it without rendering again."""
+        with self._cond:
+            return self._replayable
+
+    @property
+    def retained_bytes(self) -> int:
+        """Bytes held for this render. One audio second of float32 at 24 kHz is 96,000 bytes."""
+        with self._cond:
+            return self._retained_bytes
 
     @property
     def complete(self) -> bool:
@@ -81,10 +104,14 @@ class RenderAhead:
         if not self.complete:
             raise RuntimeError("rewind needs a finished render")
         with self._cond:
+            if not self._replayable:
+                raise RuntimeError("rewind needs the retained audio, which was released for a long text")
             self._cancel = cancel
             self._started = False
             self._played_s = 0.0
             self._underruns = 0
+            self._handled = 0
+            self._handled_end_s = 0.0
 
     # ----- renderer thread -------------------------------------------------
     def _run(self, engine: Any, text: str, voice: str, speed: float) -> None:
@@ -99,6 +126,7 @@ class RenderAhead:
                 with self._cond:
                     index = len(self._chunks)
                     self._chunks.append(chunk)
+                    self._retained_bytes += chunk.nbytes
                     seconds = len(chunk) / self.sample_rate
                     self._rendered_s += seconds
                     self._render_wall_s += wall
@@ -127,7 +155,7 @@ class RenderAhead:
     def _ahead_limit_reached(self) -> bool:
         if not self._started:
             return False  # before playback starts, render freely up to the start threshold
-        return self._rendered_s - self._played_s >= AHEAD_CAP_S
+        return self._rendered_s - self._played_s >= self._ahead_cap_s
 
     # ----- estimates (call with the lock held) ----------------------------
     def _estimate_locked(self) -> tuple[float, float]:
@@ -194,25 +222,119 @@ class RenderAhead:
     def chunk(self, index: int) -> np.ndarray | None:
         """Chunk `index`, waiting for the renderer if needed. None once the text is finished or cancelled."""
         with self._cond:
-            if index >= len(self._chunks) and not self._done and not self._cancel.is_set():
-                self._underruns += 1
+            waited = False
             while index >= len(self._chunks) and not self._done and self._error is None and not self._cancel.is_set():
+                waited = True
                 self._cond.wait(POLL_S)
+            if waited and index < len(self._chunks):
+                # Counted only once the wait is over and the chunk arrived: a player that merely asked
+                # before the renderer caught up did not wait, so it is not an underrun.
+                self._underruns += 1
             if index < len(self._chunks):
-                return self._chunks[index]
+                found = self._chunks[index]
+                if found is None:
+                    raise RuntimeError("this render's audio was released; render the text again to replay it")
+                if found.dtype != np.float32:
+                    return found.astype(np.float32) / 32767.0  # released chunks are held as int16
+                return found
             if self._error is not None:
                 raise self._error
             return None
 
     def mark_started(self) -> None:
+        """Freeze the render-ahead limit for this run.
+
+        The start decision may plan a lead larger than AHEAD_CAP_S (a slow machine plans 37-167 s of lead
+        for a long text, see start_threshold). The gate kept the 30 s floor and discarded the lead the start
+        decision had just waited for, so the cap follows the plan instead: max(floor, planned lead).
+        """
         with self._cond:
             self._started = True
+            threshold, _ = self._planned_threshold_locked()
+            if math.isfinite(threshold):
+                self._ahead_cap_s = max(AHEAD_CAP_S, threshold)
 
     def mark_played(self, samples: int) -> None:
-        """Tell the renderer how far the listener has got, so it can pause when far enough ahead."""
+        """Tell the renderer how far the listener has got, so it can pause when far enough ahead, and release
+        the audio already heard (see _release_played_locked)."""
         with self._cond:
             self._played_s += samples / self.sample_rate
+            self._release_played_locked()
             self._cond.notify_all()
+
+    def _release_played_locked(self) -> None:
+        """Shrink what the listener has already passed. Chunks are kept so Restart replays without rendering.
+
+        96,000 bytes per audio second means a 30-minute text holds about 173 MB for the session. Past
+        COMPACT_AFTER_S the played chunks are downcast to int16 (half), and past RETAIN_MAX_BYTES they are
+        dropped: the render is then no longer replayable, and Restart renders the text again instead.
+        """
+        if self._played_s < COMPACT_AFTER_S:
+            return
+        while self._handled < len(self._chunks):
+            chunk = self._chunks[self._handled]
+            end_s = self._handled_end_s + len(chunk) / self.sample_rate
+            if end_s > self._played_s:
+                break
+            if self._retained_bytes > RETAIN_MAX_BYTES:
+                self._chunks[self._handled] = None
+                self._retained_bytes -= chunk.nbytes
+                self._replayable = False
+            elif chunk.dtype != np.int16:
+                compact = (np.clip(chunk, -1.0, 1.0) * 32767.0).astype(np.int16)
+                self._retained_bytes -= chunk.nbytes - compact.nbytes
+                self._chunks[self._handled] = compact
+            self._handled_end_s = end_s
+            self._handled += 1
+
+
+class StreamPlayer:
+    """One output stream for a whole playback run, written to directly.
+
+    `sd.play()` builds a stream, plays it and tears it down on every call: measured on this machine that is
+    about 265 ms of silent dead air at each sentence seam (rea/buffer-audit.md), which is the stutter the
+    listener heard. Writing to one stream that stays open is audio-true instead.
+
+    `write()` blocks until the device has taken the audio, so it is also the clock: the caller's
+    loops stay in step with what is actually heard, with no queue and no timer.
+    """
+
+    def __init__(self, sd: Any, sample_rate: int) -> None:
+        self._sd = sd
+        self._rate = sample_rate
+        self._stream: Any = None
+        self.underruns = 0  # device side: times the card wanted samples and there were none
+
+    def open(self) -> None:
+        self._stream = self._sd.OutputStream(samplerate=self._rate, channels=1, dtype="float32")
+        self._stream.start()
+
+    def write(self, audio: np.ndarray) -> None:
+        stream = self._stream
+        if stream is None:
+            raise RuntimeError("the output stream is not open")
+        if stream.write(np.ascontiguousarray(audio, dtype=np.float32)):
+            self.underruns += 1  # the device ran dry: this one IS an audible gap, reported to the user
+
+    def close(self) -> None:
+        """Let the audio already buffered finish, then close. Used at the natural end of a run."""
+        stream, self._stream = self._stream, None
+        if stream is None:
+            return
+        try:
+            stream.stop()
+        finally:
+            stream.close()
+
+    def stop(self) -> None:
+        """Drop what is still buffered and close now, from any thread. Used by the Stop button."""
+        stream, self._stream = self._stream, None
+        if stream is None:
+            return
+        try:
+            stream.abort()
+        finally:
+            stream.close()
 
 
 def play_buffered(
@@ -220,7 +342,6 @@ def play_buffered(
     cancel: threading.Event,
     lock: threading.Lock,
     play: Callable[[np.ndarray], None],
-    wait: Callable[[], None],
     on_start: Callable[[], None] | None = None,
     on_progress: Callable[[float, str], None] | None = None,
     gap_s: float = SENTENCE_GAP_S,
@@ -228,9 +349,10 @@ def play_buffered(
 ) -> bool:
     """Play the rendered chunks in order, with a gap between them. Returns False if Stop came first.
 
-    `play` runs under `lock`, the same lock Stop holds while it calls sd.stop(), so a Stop cannot
-    slip in between the cancel check and the start of playback. `on_chunk(index)` runs as each
-    sentence begins, so the reading highlight can follow the speech.
+    `play(audio)` hands the samples to the device and returns once they have been heard, so this loop runs
+    at listening speed. The lock is held only for the Stop check and the first-sound bookkeeping, never
+    across `play`: Stop must be able to interrupt a blocking write from the Tk thread.
+    `on_chunk(index)` runs as each sentence begins, so the reading highlight can follow the speech.
     """
     if not ahead.wait_for_start(on_progress):
         return False
@@ -246,17 +368,22 @@ def play_buffered(
         if len(chunk) == 0:
             continue
         for piece in ([chunk] if not started or len(gap) == 0 else [gap, chunk]):
+            just_started = False
             with lock:
                 if cancel.is_set():
                     return False
                 if not started:
-                    started = True
+                    started = just_started = True
                     ahead.mark_started()
-                    if on_start is not None:
-                        on_start()
-                if on_chunk is not None and piece is chunk:
-                    on_chunk(sentence)  # the sentence is about to be heard, so the highlight moves now
+            if just_started and on_start is not None:
+                on_start()
+            if on_chunk is not None and piece is chunk:
+                on_chunk(sentence)  # the sentence is about to be heard, so the highlight moves now
+            try:
                 play(piece)
-            wait()
+            except Exception:
+                if cancel.is_set():
+                    return False  # Stop interrupted the write; that is not a playback failure
+                raise
             ahead.mark_played(len(piece))
     return not cancel.is_set()

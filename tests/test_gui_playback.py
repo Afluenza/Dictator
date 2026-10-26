@@ -29,7 +29,7 @@ class FakeEngine:
 
 def _run(engine, cancel, play, text="a. b. c.", gap_s=0.0):
     ahead = RenderAhead(engine, text, "v", 1.0, cancel)
-    return play_buffered(ahead, cancel, threading.Lock(), play=play, wait=lambda: None, gap_s=gap_s)
+    return play_buffered(ahead, cancel, threading.Lock(), play=play, gap_s=gap_s)
 
 
 # ----- start rule ----------------------------------------------------------
@@ -123,8 +123,8 @@ def test_slow_renderer_waits_and_never_ends_playback_early(monkeypatch):
     engine = FakeEngine([float(i) for i in range(8)], sample_rate=4, delay=0.3)
 
     ahead = RenderAhead(engine, " ".join(["Sentence."] * 8), "v", 1.0, cancel)
-    completed = play_buffered(ahead, cancel, threading.Lock(), play=lambda a: played.append(float(a[0])),
-                              wait=lambda: None, gap_s=0.0)
+    completed = play_buffered(ahead, cancel, threading.Lock(),
+                              play=lambda a: played.append(float(a[0])), gap_s=0.0)
 
     assert completed is True
     assert played == [float(i) for i in range(8)]
@@ -154,14 +154,14 @@ def test_rewind_replays_the_finished_audio_without_rendering_again():
     engine = FakeEngine([1.0, 2.0, 3.0], sample_rate=4)
     ahead = RenderAhead(engine, "a. b. c.", "v", 1.0, cancel)
     first, second = [], []
-    assert play_buffered(ahead, cancel, threading.Lock(), play=lambda a: first.append(float(a[0])),
-                         wait=lambda: None, gap_s=0.0) is True
+    assert play_buffered(ahead, cancel, threading.Lock(),
+                         play=lambda a: first.append(float(a[0])), gap_s=0.0) is True
     renders_after_first_run = len(engine.rendered)
 
     replay_cancel = threading.Event()
     ahead.rewind(replay_cancel)
-    assert play_buffered(ahead, replay_cancel, threading.Lock(), play=lambda a: second.append(float(a[0])),
-                         wait=lambda: None, gap_s=0.0) is True
+    assert play_buffered(ahead, replay_cancel, threading.Lock(),
+                         play=lambda a: second.append(float(a[0])), gap_s=0.0) is True
 
     assert second == first == [1.0, 2.0, 3.0]
     assert len(engine.rendered) == renders_after_first_run  # the replay reused the cached audio
