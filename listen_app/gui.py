@@ -27,7 +27,7 @@ from listen_app.extract import (SUPPORTED_SUFFIXES, ExtractError, UnsupportedInp
                                 validate_url)
 from listen_app import reading, theme
 from listen_app.playback import RenderAhead, play_buffered
-from listen_app.tts import MAX_SPEED, MIN_SPEED, clamp_speed
+from listen_app.tts import MAX_SPEED, MIN_SPEED, clamp_speed, labelled_voices, voice_id_for
 
 POLL_MS = 100
 
@@ -257,9 +257,12 @@ class ListenApp(ctk.CTk):
         if kind == "engine":
             self._engine = payload
             names = payload.voice_names()
-            default = getattr(payload, "default_voice", names[0])
-            self.voice_menu.configure(values=names)
-            self.voice_menu.set(default if default in names else names[0])
+            default = getattr(payload, "default_voice", names[0] if names else "")
+            # The menu shows short labels ("Heart"), while the engine keeps the real ID ("af_heart").
+            # Built from `names` each time, so a label can never outlive the voice list it came from.
+            self._voice_labels = labelled_voices(names)
+            self.voice_menu.configure(values=list(self._voice_labels.values()))
+            self.voice_menu.set(self._voice_labels.get(default, next(iter(self._voice_labels.values()), "")))
             self._set_buttons(read=True, stop=False)
             self.status.configure(text=f"Ready. {len(names)} voices.")
         elif kind == "engine_error":
@@ -358,7 +361,7 @@ class ListenApp(ctk.CTk):
         self.progress.set(0)
         self._cancel = threading.Event()
         threading.Thread(target=self._read_worker,
-                         args=("", None, 1.0, self._cancel, self._last_ahead), daemon=True).start()
+                         args=("", None, 1.0, self._cancel, self._last_ahead, ""), daemon=True).start()
 
     def _on_new(self) -> None:
         """Clear the text and the completion state, then put the cursor in the box for new input."""
@@ -821,6 +824,14 @@ class ListenApp(ctk.CTk):
 
         return isinstance(self._engine, KokoroEngine)
 
+    def _selected_voice(self) -> str:
+        """The Kokoro voice ID the menu is showing, or "" to let the engine use its own default."""
+        try:
+            chosen = self.voice_menu.get()
+        except Exception:  # a stub or half-built menu must not stop speech
+            return ""
+        return voice_id_for(chosen, getattr(self, "_voice_labels", {}))
+
     def _say_voice_names(self) -> list[str]:
         """The macOS voices available, read once. A machine without `say` returns none, which is reported."""
         if not hasattr(self, "_say_voices_cache"):
@@ -840,11 +851,13 @@ class ListenApp(ctk.CTk):
         self.progress.set(0)
         self._cancel = threading.Event()
         threading.Thread(
-            target=self._read_worker, args=(text, choice, speed, self._cancel, reuse), daemon=True
+            target=self._read_worker,
+            args=(text, choice, speed, self._cancel, reuse, self._selected_voice()), daemon=True
         ).start()
 
     def _read_worker(
-        self, text: str, choice, speed: float, cancel: threading.Event, reuse: RenderAhead | None
+        self, text: str, choice, speed: float, cancel: threading.Event, reuse: RenderAhead | None,
+        kokoro_voice: str = "",
     ) -> None:
         try:
             import sounddevice as sd
@@ -852,7 +865,8 @@ class ListenApp(ctk.CTk):
             from listen_app.tts import SayEngine
 
             engine = self._engine if choice is None or choice.engine == "kokoro" else SayEngine()
-            voice = "" if choice is None or choice.engine == "kokoro" else choice.voice
+            # The menu's voice was read on the Tk thread and passed in; the other languages name their own.
+            voice = kokoro_voice if choice is None or choice.engine == "kokoro" else choice.voice
             rate = engine.sample_rate
             if reuse is None:
                 ahead = RenderAhead(engine, text, voice, speed, cancel)
