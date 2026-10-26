@@ -26,7 +26,7 @@ import customtkinter as ctk
 from listen_app.extract import (SUPPORTED_SUFFIXES, ExtractError, UnsupportedInput, extract_file,
                                 validate_url)
 from listen_app import reading, theme
-from listen_app.playback import RenderAhead, play_buffered
+from listen_app.playback import RenderAhead, StreamPlayer, play_buffered
 from listen_app.tts import MAX_SPEED, MIN_SPEED, clamp_speed, labelled_voices, voice_id_for
 
 POLL_MS = 100
@@ -58,6 +58,7 @@ class ListenApp(ctk.CTk):
         self._events: queue.Queue = queue.Queue()
         self._cancel: threading.Event | None = None
         self._play_lock = threading.Lock()
+        self._player: StreamPlayer | None = None  # the open output stream, so Stop can abort it from here
         self._last_ahead: RenderAhead | None = None  # finished render, kept so Restart replays without rendering
         self._reading = reading.ReadingState()  # one phase and one position for the whole window (see reading.py)
         self._notes = None  # the Notes window, created on first use
@@ -340,15 +341,23 @@ class ListenApp(ctk.CTk):
             self.stop_button.grid()
 
     # ----- completion (in this window; no popup) -------------------------------
-    def _finish(self, ahead: RenderAhead) -> None:
-        """Playback reached the end of the text by itself. Restart and New appear here, in this window."""
+    def _finish(self, pay) -> None:
+        """Playback reached the end of the text by itself. Restart and New appear here, in this window.
+
+        `pay` is (the finished render, times the renderer had to wait, times the sound card ran dry).
+        The device count is reported, because a card that ran dry is an audible gap the app used to hide.
+        """
+        ahead, render_waits, device_gaps = pay if isinstance(pay, tuple) else (pay, 0, 0)
         self._busy = False
         self._last_ahead = ahead
         self._reading.finish()
         self._clear_band()
         self.progress.set(0)
         self._set_buttons(read=False, stop=False, finished=True)
-        self.status.configure(text="Finished reading. Restart to hear it again, or New for new text.")
+        message = "Finished reading. Restart to hear it again, or New for new text."
+        if device_gaps:
+            message += f" The sound card ran dry {device_gaps} time(s), so some audio may have been dropped."
+        self.status.configure(text=message)
 
     def _on_restart(self) -> None:
         """Replay the finished text from the top, reusing the cached audio, with no new render and no popup."""
@@ -868,23 +877,42 @@ class ListenApp(ctk.CTk):
             # The menu's voice was read on the Tk thread and passed in; the other languages name their own.
             voice = kokoro_voice if choice is None or choice.engine == "kokoro" else choice.voice
             rate = engine.sample_rate
+            if reuse is not None and not reuse.replayable:
+                reuse = None  # a long text let its played audio go; Restart renders it again
+                self._events.put(("status", "Restarting: rendering the text again..."))
             if reuse is None:
                 ahead = RenderAhead(engine, text, voice, speed, cancel)
             else:
                 ahead = reuse
                 ahead.rewind(cancel)
-            completed = play_buffered(
-                ahead,
-                cancel,
-                self._play_lock,
-                play=lambda audio: sd.play(audio, rate),
-                wait=sd.wait,
-                on_start=lambda: self._events.put(("status", "Playing...")),
-                on_progress=lambda fraction, message: self._events.put(("progress", (fraction, message))),
-                on_chunk=lambda sentence: self._events.put(("sentence", (cancel, sentence))),
-            )
+            # ONE stream for the whole run. Opening a stream per sentence added about 265 ms of silence
+            # at every seam on this machine (rea/buffer-audit.md); writing to one stream is audio-true.
+            player = StreamPlayer(sd, rate)
+            # The lock is taken only to publish the player and to open the stream, never around play_buffered:
+            # play_buffered takes the same non-reentrant lock itself, and Stop must be able to reach in.
+            with self._play_lock:
+                if cancel.is_set():
+                    self._events.put(("done", "Stopped."))
+                    return
+                self._player = player
+                player.open()
+            try:
+                completed = play_buffered(
+                    ahead,
+                    cancel,
+                    self._play_lock,
+                    play=player.write,
+                    on_start=lambda: self._events.put(("status", "Playing...")),
+                    on_progress=lambda fraction, message: self._events.put(("progress", (fraction, message))),
+                    on_chunk=lambda sentence: self._events.put(("sentence", (cancel, sentence))),
+                )
+            finally:
+                player.close()
+                with self._play_lock:
+                    if self._player is player:
+                        self._player = None
             if completed:
-                self._events.put(("finished", ahead))
+                self._events.put(("finished", (ahead, ahead.underruns, player.underruns)))
             else:
                 self._events.put(("done", "Stopped."))
         except Exception as exc:
@@ -895,12 +923,12 @@ class ListenApp(ctk.CTk):
 
         The text and the reading position are kept, so Read resumes from the word being spoken.
         """
-        import sounddevice as sd
-
         with self._play_lock:
             if self._cancel is not None:
                 self._cancel.set()
-            sd.stop()
+            player = self._player
+            if player is not None:
+                player.stop()  # aborts the open stream, which is what ends the audio now
         self._reading.stop()
         self._set_buttons(read=True, stop=False)
 

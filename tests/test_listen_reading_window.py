@@ -372,8 +372,9 @@ def test_restart_runs_the_real_playback_worker_without_error(window, monkeypatch
 
     # The worker imports sounddevice, which needs the PortAudio system library. The Linux CI runner has no PortAudio,
     # so the module is replaced before the worker runs. No audio device is ever opened.
-    fake_sd = types.SimpleNamespace(play=lambda *a, **k: None, wait=lambda *a, **k: None, stop=lambda *a, **k: None)
-    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    from tests.fixtures.fake_sounddevice import make_sd
+
+    monkeypatch.setitem(sys.modules, "sounddevice", make_sd())
 
     class FakeEngine:
         sample_rate = 24000
